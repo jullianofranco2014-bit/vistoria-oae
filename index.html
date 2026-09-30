@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b4f8a">
+  <title>Vistoria OAE</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icone.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icone-192.png">
+  <link rel="stylesheet" href="estilo.css?v=0.2c">
+</head>
+<body>
+  <header class="topo">
+    <button id="voltar" class="topo-voltar" aria-label="Voltar" hidden>‹</button>
+    <div class="topo-titulo">
+      <strong id="titulo">Vistoria OAE</strong>
+      <span id="subtitulo">UL Palmas</span>
+    </div>
+    <button id="instalar" class="topo-acao" hidden>Instalar</button>
+  </header>
+  <main id="tela" aria-live="polite"></main>
+  <div id="aviso" class="aviso" role="status" hidden></div>
+  <!-- ao publicar versão nova: trocar o ?v= aqui e o CACHE no sw.js -->
+  <script src="app.js?v=0.2c"></script>
+</body>
+</html>
