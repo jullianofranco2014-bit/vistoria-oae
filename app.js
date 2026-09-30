@@ -7,7 +7,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.2";
+const VERSAO_APP = "0.2.4";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -387,7 +387,9 @@ const DIRECAO = { 0: "no sentido crescente", 90: "para o lado LD", 180: "no sent
 function textoPosicao(r, L) {
   const lado = r.y < 0 ? "fora do tabuleiro, do lado LE" : r.y > 1 ? "fora do tabuleiro, do lado LD"
     : r.y < 0.3 ? "junto ao lado LE" : r.y > 0.7 ? "junto ao lado LD" : "no eixo";
-  const onde = r.x < 0 ? `${num(-r.x, 0)} m antes do Encontro 01` : r.x > L ? `${num(r.x - L, 0)} m depois do Encontro 02`
+  const onde = Math.abs(r.x) < 0.5 ? "no início do tabuleiro, junto ao Encontro 01"
+    : Math.abs(r.x - L) < 0.5 ? "no fim do tabuleiro, junto ao Encontro 02"
+    : r.x < 0 ? `${num(-r.x, 0)} m antes do Encontro 01` : r.x > L ? `${num(r.x - L, 0)} m depois do Encontro 02`
     : `a ${num(r.x, 0)} m do Encontro 01`;
   return `${onde}, ${lado}`;
 }
@@ -400,12 +402,15 @@ function miniCroqui(o, roteiro, atual, status) {
   const px = x => x0 + (x - xmin) / (xmax - xmin) * (x1 - x0), py = y => yt + (yb - yt) * y;
   let apoios = "", acum = 0;
   ext.slice(0, -1).forEach(e => { acum += e; apoios += `<line x1="${px(acum)}" y1="${yt}" x2="${px(acum)}" y2="${yb}" stroke="#8a94a3" stroke-dasharray="3 3"/>`; });
-  const seta = (r, cor, larg, comp) => {
-    if (r.direcao == null) return "";
-    const a = r.direcao * Math.PI / 180, cx = px(r.x), cy = py(r.y), ex = cx + comp * Math.cos(a), ey = cy + comp * Math.sin(a);
-    const h = 7, b1 = a + Math.PI * 0.82, b2 = a - Math.PI * 0.82;
-    return `<line x1="${cx}" y1="${cy}" x2="${ex}" y2="${ey}" stroke="${cor}" stroke-width="${larg}"/>
-      <polygon points="${ex},${ey} ${ex + h * Math.cos(b1)},${ey + h * Math.sin(b1)} ${ex + h * Math.cos(b2)},${ey + h * Math.sin(b2)}" fill="${cor}"/>`;
+  /* foto atual: ponto + seta de ponta cheia (mesmo símbolo do croqui da ficha); sem direção, só o ponto vazado */
+  const marcador = (r, cor) => {
+    const cx = px(r.x), cy = py(r.y);
+    if (r.direcao == null) return `<circle cx="${cx}" cy="${cy}" r="5" fill="#fff" stroke="${cor}" stroke-width="2.5"/>`;
+    const a = r.direcao * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+    const p = (u, v) => `${cx + u * c - v * s},${cy + u * s + v * c}`;
+    return `<line x1="${cx}" y1="${cy}" x2="${cx + 24 * c}" y2="${cy + 24 * s}" stroke="${cor}" stroke-width="3"/>
+      <polygon points="${p(34, 0)} ${p(22, -6)} ${p(22, 6)}" fill="${cor}"/>
+      <circle cx="${cx}" cy="${cy}" r="5" fill="${cor}"/>`;
   };
   const pontos = roteiro.filter(r => r.n !== atual.n).map(r =>
     `<circle cx="${px(r.x)}" cy="${py(r.y)}" r="3.5" fill="${status[r.n] ? "#1d7a3e" : "#c3cad4"}"/>`).join("");
@@ -418,8 +423,7 @@ function miniCroqui(o, roteiro, atual, status) {
     <text x="8" y="${yt + 4}" font-size="11" font-weight="700" fill="#5a6472">LE</text>
     <text x="8" y="${yb + 4}" font-size="11" font-weight="700" fill="#5a6472">LD</text>
     ${pontos}
-    <circle cx="${px(atual.x)}" cy="${py(atual.y)}" r="6" fill="#b42318"/>
-    ${seta(atual, "#b42318", 3, 34)}
+    ${marcador(atual, "#b42318")}
   </svg>`;
 }
 
@@ -478,7 +482,9 @@ async function telaFoto(vid, n) {
     </div>
     <div id="gps"></div>
     ${foto ? `<div class="cartao"><img src="${url}" alt="Foto R${n}" style="width:100%;border-radius:8px">
-      <p class="suave">${reg ? `${esc(reg.data_hora.replace("T", " ").slice(0, 16))} · ${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m${reg.azimute != null ? ` · bússola ${rumo(reg.azimute)}` : ""}` : ""}</p></div>` : ""}
+      <p class="suave">${reg ? `${esc(reg.data_hora.replace("T", " ").slice(0, 16))} · ${reg.carimbo
+        ? `${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m`
+        : `<span style="color:var(--alerta)">sem GPS — refaça a foto com a localização ligada</span>`}${reg.azimute != null ? ` · bússola ${rumo(reg.azimute)}` : ""}` : ""}</p></div>` : ""}
     ${st[n] === "pulada" ? `<div class="cartao" style="border-color:var(--alerta)"><b>Marcada como não se aplica:</b> ${esc((v.roteiro_motivos || {})[n] || "")}</div>` : ""}
     <div class="botoes">
       <label class="botao">${foto ? "Refazer foto" : "Tirar foto"}
