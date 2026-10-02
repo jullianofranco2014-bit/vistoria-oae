@@ -117,3 +117,18 @@ input[type=text], input[type=date], input[type=search], textarea, select {
 }
 .fichas input { position: absolute; opacity: 0; pointer-events: none; }
 .fichas label:has(input:checked) { border-color: var(--erro); background: #fdecea; color: var(--erro); }
+/* avaliação: nota (5 a 1) e EC (4 a 1) em botões grandes; miniaturas das fotos do elemento */
+.notas { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.notas .nota, .ecs .ec {
+  min-height: 56px; border: 2px solid var(--borda); border-radius: 10px; background: #fff; color: var(--texto);
+  font: inherit; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4px;
+}
+.notas .nota b { font-size: 1.35rem; line-height: 1.1; }
+.notas .nota span { font-size: .7rem; color: var(--suave); }
+.notas .nota.marcada, .ecs .ec.marcada { border-color: var(--azul); background: #e8eef6; color: var(--azul); }
+.ecs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ecs .ec { min-height: 48px; font-weight: 600; font-size: .92rem; }
+details summary { cursor: pointer; color: var(--azul); font-weight: 600; margin: 8px 0; }
+.miniaturas { display: flex; flex-wrap: wrap; gap: 8px; }
+.miniaturas a { display: flex; flex-direction: column; align-items: center; text-decoration: none; color: var(--suave); font-size: .8rem; font-weight: 600; }
+.miniaturas img { width: 84px; height: 63px; object-fit: cover; border-radius: 6px; border: 1px solid var(--borda); }

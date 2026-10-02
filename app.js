@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.3.1";
+const VERSAO_APP = "0.4.0";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -133,7 +133,11 @@ async function rotear() {
     if (rota === "foto" && arg) return telaFoto(decodeURIComponent(arg), Number(partes[2]));
     if (rota === "danos" && arg) return telaDanos(decodeURIComponent(arg));
     // #/dano/<vistoria>/<nº do dano ou "novo">[/<foto do roteiro em que foi visto>]
-    if (rota === "dano" && arg) return telaDano(decodeURIComponent(arg), partes[2], partes[3] ? Number(partes[3]) : null);
+    // (com /-/<i>: foto de dano nova já com o elemento i, aberta pela avaliação do elemento)
+    if (rota === "dano" && arg) return telaDano(decodeURIComponent(arg), partes[2], partes[3] && partes[3] !== "-" ? Number(partes[3]) : null,
+      false, partes[4] != null ? Number(partes[4]) : null);
+    if (rota === "avaliacao" && arg) return telaAvaliacao(decodeURIComponent(arg));
+    if (rota === "elemento" && arg) return telaElemento(decodeURIComponent(arg), Number(partes[2]));
     // #/extra/<vistoria>/novo[/<foto do roteiro>]: foto extra (vista complementar, sem dano)
     if (rota === "extra" && arg) return telaDano(decodeURIComponent(arg), "novo", partes[3] ? Number(partes[3]) : null, true);
     if (rota === "dados") return telaDados(false);
@@ -190,7 +194,7 @@ async function telaInicio() {
     return `<button class="lista-item" data-id="${esc(v.id)}">
       <div class="linha"><span class="nome">${esc(o ? `${o.item}. ${o.nome}` : v.oae)}</span>
         <span class="selo">${esc(v.tipo_inspecao)}</span></div>
-      <div class="detalhe">${dataBR(v.data)} · ${v.fotos.length} foto(s) · ${v.avaliacao.length} elemento(s) avaliado(s)</div>
+      <div class="detalhe">${dataBR(v.data)} · ${v.fotos.length} foto(s) · ${v.avaliacao.filter(a => a.nota != null).length} elemento(s) avaliado(s)</div>
     </button>`;
   }).join("");
   $("#tela").innerHTML = `
@@ -300,12 +304,14 @@ async function telaVistoria(id) {
   const st = v.roteiro_status || {};
   const feitas = o.roteiro.filter(r => st[r.n]).length;
   const nExtras = v.fotos.filter(f => f.dano && ehExtra(f)).length, nDanos = v.fotos.filter(f => f.dano).length - nExtras;
+  const nAvaliados = v.avaliacao.filter(a => a.nota != null).length;
   // [título, texto, parte futura, link, selo, selo ok?]
   const etapas = [
     ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${enc(v.id)}`,
       feitas === o.roteiro.length ? "concluído" : "abrir ›", feitas === o.roteiro.length],
     ["Fotos de dano e extras", `${nDanos} de dano · ${nExtras} extra(s)`, null, `#/danos/${enc(v.id)}`, "abrir ›", false],
-    ["Avaliação dos elementos", `${o.elementos.length} elementos · nota e danos`, "parte 4"],
+    ["Avaliação dos elementos", `${nAvaliados} de ${o.elementos.length} elementos avaliados · nota e danos`, null,
+      `#/avaliacao/${enc(v.id)}`, nAvaliados === o.elementos.length ? "concluído" : "abrir ›", nAvaliados === o.elementos.length],
     ["Textos e laudo", "Aspectos especiais, deficiências, observações e laudo", "parte 5"],
     ["Exportar", "Pacote para o computador (JSON + fotos)", "parte 6"],
   ];
@@ -660,6 +666,18 @@ function tipoElemento(e) {
 }
 const REGIOES = ["Superestrutura", "Mesoestrutura", "Infraestrutura", "Transição"];
 const chaveEl = e => `${e.elemento}|${e.tramo}`;
+/* elemento de um registro (foto ou avaliação): pela posição na lista da ficha (há códigos repetidos no mesmo tramo,
+ * ex.: T1 a T3 de cada viga do Córrego Aroeira) ou, em registros antigos, por código + tramo */
+const elDoRegistro = (o, d) => (d.indice != null && o.elementos[d.indice]) || o.elementos.find(e => e.elemento === d.elemento && e.tramo === d.tramo) || null;
+/* nome do elemento para listas: "T1 – TRANSVERSINA (tramo 2)"; códigos repetidos ganham a ordem ("2º T1") */
+function nomesElementos(o) {
+  const vezes = {}, multi = o.tramos.length > 1;
+  const total = o.elementos.reduce((m, e) => (m[chaveEl(e)] = (m[chaveEl(e)] || 0) + 1, m), {});
+  return o.elementos.map(e => {
+    const k = chaveEl(e), n = (vezes[k] = (vezes[k] || 0) + 1);
+    return `${total[k] > 1 ? `${n}º ` : ""}${e.elemento} – ${e.detalhe || ""}${multi ? ` (tramo ${e.tramo})` : ""}`;
+  });
+}
 
 function tramoDe(o, x) {
   let acum = 0;
@@ -730,7 +748,7 @@ async function telaDanos(vid) {
 
 /* uma foto de dano: elemento, foto, posição e direção no croqui (dois toques), danos e legenda.
  * Antes da foto, o que for preenchido fica só na tela; depois da foto, cada mudança é gravada na hora. */
-async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
+async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   const v = await BD.ler("vistorias", vid);
   const o = v && Estado.oaes.get(v.oae);
   if (!o) { location.hash = "#/"; return; }
@@ -742,7 +760,8 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
   const oQue = extra ? "foto extra" : "foto de dano";
   const perto = reg ? reg.perto_de : pertoArg;
   const r = perto != null ? o.roteiro.find(x => x.n === perto) : null;
-  const voltar = r ? `#/foto/${enc(vid)}/${r.n}` : `#/danos/${enc(vid)}`;
+  // volta para onde veio: a foto do roteiro, a avaliação do elemento ou a lista de fotos de dano
+  const voltar = r ? `#/foto/${enc(vid)}/${r.n}` : elArg != null ? `#/elemento/${enc(vid)}/${elArg}` : `#/danos/${enc(vid)}`;
   cabecalho(reg ? `${extra ? "Foto extra" : "Foto de dano"} F${pad(reg.n)}` : `Nova ${oQue}`,
     `${r ? `junto à R${pad(r.n)} · ` : ""}${o.item}. ${o.nome}`, voltar);
   GPS.iniciar();
@@ -750,7 +769,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
   const foto = k ? await BD.ler("fotos", `${vid}#D${k}`) : null;
   const sug = sugestoes(o, r);
   const f = {
-    el: reg ? o.elementos.find(e => e.elemento === reg.elemento && e.tramo === reg.tramo) || null : sug.length === 1 ? sug[0] : null,
+    el: reg ? elDoRegistro(o, reg) : elArg != null ? o.elementos[elArg] || null : sug.length === 1 ? sug[0] : null,
     danos: reg?.danos ? [...reg.danos] : [], onde: reg?.onde || "", obs: reg?.obs || "",
     legenda: reg?.legenda || "", editada: !!reg?.legenda_editada,
     // posição: a gravada; se não, a da foto do roteiro em que o dano foi visto (já aceita, pode remarcar)
@@ -762,6 +781,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
   const campos = () => ({
     tipo: extra ? "extra" : "dano",
     perto_de: perto ?? null, elemento: f.el ? f.el.elemento : null, tramo: f.el ? f.el.tramo : null,
+    indice: f.el ? o.elementos.indexOf(f.el) : null,
     danos: f.danos, onde: f.onde.trim(), legenda: legendaAtual(), legenda_editada: f.editada, obs: f.obs.trim(),
     x: f.x, y: f.y, direcao: f.semDirecao ? null : f.direcao, sem_direcao: f.semDirecao, posicao_marcada: modo === "pronto",
   });
@@ -780,7 +800,9 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
   };
 
   const multiTramo = o.tramos.length > 1;
-  const nomeEl = e => `${e.elemento} – ${e.detalhe || ""}${multiTramo ? ` (tramo ${e.tramo})` : ""}`;
+  const nomes = nomesElementos(o);
+  const ch = e => String(o.elementos.indexOf(e));   // chave do elemento: posição na lista da ficha
+  const nomeEl = e => nomes[o.elementos.indexOf(e)];
   const porRegiao = [...REGIOES, null].map(rg => [rg, o.elementos.filter(e => rg ? e.regiao === rg : !REGIOES.includes(e.regiao))])
     .filter(([, es]) => es.length);
   const url = foto ? URL.createObjectURL(foto.blob) : null;
@@ -788,12 +810,12 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
     ${r ? `<div class="cartao"><p class="suave">${extra ? "Foto extra junto à" : "Dano visto na"} foto do roteiro:</p><p><b>R${pad(r.n)}</b> · ${esc(r.legenda)}</p></div>` : ""}
     <h2>1. Elemento${extra ? " (opcional)" : ""}</h2>
     ${sug.length ? `<div class="fichas" id="sug">${sug.map(e => `
-      <label><input type="radio" name="sug" value="${esc(chaveEl(e))}" ${f.el && chaveEl(f.el) === chaveEl(e) ? "checked" : ""}><span>${esc(e.elemento)}${multiTramo ? ` · T${e.tramo}` : ""}</span></label>`).join("")}</div>
+      <label><input type="radio" name="sug" value="${ch(e)}" ${f.el === e ? "checked" : ""}><span>${esc(e.elemento)}${multiTramo ? ` · T${e.tramo}` : ""}</span></label>`).join("")}</div>
       <p class="suave">Ou escolha na lista completa:</p>` : ""}
     <select id="el-todos">
       <option value="">${sug.length ? "Outro elemento…" : "Escolha o elemento…"}</option>
       ${porRegiao.map(([rg, es]) => `<optgroup label="${esc(rg || "Outros")}">${es.map(e =>
-        `<option value="${esc(chaveEl(e))}" ${f.el && chaveEl(f.el) === chaveEl(e) && !sug.some(s => chaveEl(s) === chaveEl(e)) ? "selected" : ""}>${esc(nomeEl(e))}</option>`).join("")}</optgroup>`).join("")}
+        `<option value="${ch(e)}" ${f.el === e && !sug.includes(e) ? "selected" : ""}>${esc(nomeEl(e))}</option>`).join("")}</optgroup>`).join("")}
     </select>
     <h2>2. Foto</h2>
     <div id="gps"></div>
@@ -834,10 +856,10 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
     $("#leg-auto").hidden = !f.editada;
   };
   const escolher = chave => {
-    f.el = o.elementos.find(e => chaveEl(e) === chave) || null;
+    f.el = o.elementos[Number(chave)] || null;
     if (f.el && f.x == null) { f.x = centroTramo(o, f.el.tramo); f.y = 0.5; }   // sugestão: meio do tramo
-    document.querySelectorAll("#sug input").forEach(i => { i.checked = f.el && i.value === chave; });
-    $("#el-todos").value = f.el && !sug.some(e => chaveEl(e) === chave) ? chave : "";
+    document.querySelectorAll("#sug input").forEach(i => { i.checked = !!f.el && i.value === chave; });
+    $("#el-todos").value = f.el && !sug.includes(f.el) ? chave : "";
     desenharDanos(); desenharLegenda(); desenharCroqui(); gravar();
   };
   // danos: só os do tipo do elemento escolhido (ou todos, a pedido), mais os já marcados e os escritos à mão
@@ -957,7 +979,8 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
     vv.atualizado_em = new Date().toISOString();
     await BD.gravar("vistorias", vv);
     avisar(pos ? "Foto salva." : "Foto salva, mas sem GPS. Confira a localização do celular.", pos ? 1500 : 5000);
-    if (k) rotear(); else location.hash = `#/dano/${enc(vid)}/${kk}`;
+    // (aberta pela avaliação do elemento: continua lembrando de onde veio, para voltar para lá)
+    if (k) rotear(); else location.hash = `#/dano/${enc(vid)}/${kk}${elArg != null ? `/-/${elArg}` : ""}`;
   };
 
   $("#concluir").onclick = async () => {
@@ -985,6 +1008,228 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
   desenharDanos();
   desenharLegenda();
   desenharCroqui();
+}
+
+/* ---------- avaliação dos elementos (Anexo B) ---------- */
+// Anexo C da DNIT 010/2024-PRO (texto da aba Table 8 da ficha): nota de cada elemento, de 1 a 5
+const NOTAS_NORMA = {
+  5: ["Excelente", "Não há danos nem insuficiência estrutural. Nada a fazer."],
+  4: ["Boa", "Há alguns danos, mas não há sinais de que estejam gerando insuficiência estrutural. Nada a fazer, apenas serviços de manutenção."],
+  3: ["Regular", "Há danos gerando alguma insuficiência estrutural, mas não há sinais de comprometimento da estabilidade da estrutura. A recuperação pode ser postergada, com o problema em observação sistemática."],
+  2: ["Ruim", "Há danos gerando significativa insuficiência estrutural, porém ainda sem risco tangível de colapso. A recuperação (geralmente com reforço estrutural) deve ser feita a curto prazo."],
+  1: ["Crítica", "Há danos gerando grave insuficiência estrutural; o elemento está em estado crítico, com risco tangível de colapso. A recuperação (ou a substituição) deve ser feita sem tardar."],
+};
+const ECS_NORMA = { 4: "Bom", 3: "Razoável", 2: "Ruim", 1: "Severo" };   // Anexo D: estado de condição do dano
+const EXTENSOES = ["≤20%", ">20% e ≤40%", ">40% e ≤60%", ">60% e ≤80%", ">80%"];
+const ESTRUTURAIS = ["Superestrutura", "Mesoestrutura", "Infraestrutura"];
+
+/* nota sugerida (mesma regra do gerar.py): sem dano, 5; com dano, o menor EC (no máximo 4); faltando EC, nenhuma */
+function notaSugerida(a) {
+  const ds = a?.danos || [];
+  if (!ds.length) return 5;
+  return ds.some(d => d.ec == null) ? null : Math.min(4, ...ds.map(d => d.ec));
+}
+/* avaliação do elemento i (pela posição na lista da ficha; registros antigos por código + tramo) */
+const avaliacaoDe = (v, o, i) => v.avaliacao.find(a => a.indice === i)
+  || v.avaliacao.find(a => a.indice == null && a.elemento === o.elementos[i].elemento && a.tramo === o.elementos[i].tramo);
+const fotosDoElemento = (v, o, i) => v.fotos.filter(f => f.dano && !ehExtra(f) && elDoRegistro(o, f) === o.elementos[i]);
+
+async function telaAvaliacao(vid) {
+  const v = await BD.ler("vistorias", vid);
+  const o = v && Estado.oaes.get(v.oae);
+  if (!o) { location.hash = "#/"; return; }
+  cabecalho("Avaliação dos elementos", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
+  const nomes = nomesElementos(o);
+  const avs = o.elementos.map((e, i) => avaliacaoDe(v, o, i));
+  const feitos = avs.filter(a => a?.nota != null).length;
+  const estr = o.elementos.map((e, i) => ESTRUTURAIS.includes(e.regiao) ? avs[i]?.nota : null).filter(n => n != null);
+  const final = estr.length ? Math.min(...estr) : null;
+  const prox = avs.findIndex(a => a?.nota == null);
+  let html = "", grupo = null;
+  o.elementos.forEach((e, i) => {
+    const g = o.tramos.length > 1 ? `Tramo ${e.tramo}` : "Elementos";
+    if (g !== grupo) { grupo = g; html += `<h2>${esc(g)}</h2>`; }
+    const a = avs[i], ant = o.anterior?.elementos?.[i], nf = fotosDoElemento(v, o, i).length, nd = a?.danos?.length || 0;
+    html += `<a class="lista-item linha" href="#/elemento/${enc(vid)}/${i}" style="align-items:center">
+      <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(nomes[i])}</span>
+        <span class="detalhe" style="display:block">${esc(e.regiao || "")} · ${a?.nota != null ? (nd ? `${nd} dano(s)` : "sem dano") : "a avaliar"}${nf ? ` · ${nf} foto(s) de dano` : ""}${ant?.nota ? ` · anterior: nota ${ant.nota}` : ""}</span></span>
+      <span class="selo ${a?.nota != null ? (a.nota <= 2 ? "alerta" : "ok") : ""}">${a?.nota != null ? `nota ${a.nota}` : "›"}</span></a>`;
+  });
+  $("#tela").innerHTML = `
+    <div class="cartao"><strong>${feitos} de ${o.elementos.length} elementos avaliados</strong>
+      <div style="height:8px;background:#e5e9ef;border-radius:4px;margin-top:8px"><div style="height:8px;border-radius:4px;background:var(--ok);width:${Math.round(100 * feitos / o.elementos.length)}%"></div></div>
+      <p style="margin-top:10px">${final != null ? `<b>Nota final sugerida: ${final} – ${NOTAS_NORMA[final][0]}</b> (menor nota entre os elementos estruturais avaliados — Anexo C).`
+        : "A nota final sugerida aparece quando houver elementos estruturais avaliados."}</p>
+      <p class="suave">${o.anterior ? `Vistoria anterior: ${dataBR(o.anterior.data)} (${esc(o.anterior.arquivo)}).` : "Sem a vistoria anterior no pacote."}</p></div>
+    ${prox >= 0 ? `<div class="botoes"><a class="botao" href="#/elemento/${enc(vid)}/${prox}">Próximo a avaliar: ${esc(nomes[prox].split(" – ")[0])}</a></div>` : ""}
+    ${html}`;
+}
+
+/* avaliação de um elemento: danos (os das fotos de dano entram sozinhos), EC, extensão, nota e a vistoria anterior.
+ * Cada mudança é gravada na hora. */
+async function telaElemento(vid, i) {
+  const v = await BD.ler("vistorias", vid);
+  const o = v && Estado.oaes.get(v.oae);
+  const e = o && o.elementos[i];
+  if (!e) { location.hash = o ? `#/avaliacao/${enc(vid)}` : "#/"; return; }
+  const nomes = nomesElementos(o);
+  cabecalho(`${nomes[i].split(" – ")[0]} · avaliação`, `${e.detalhe || ""}${o.tramos.length > 1 ? ` · tramo ${e.tramo}` : ""}`, `#/avaliacao/${enc(vid)}`);
+  const ant = o.anterior?.elementos?.[i] || null;
+  const fotos = fotosDoElemento(v, o, i);
+  const minis = await Promise.all(fotos.map(f => BD.ler("fotos", `${vid}#D${f.dano}`)));
+  const a0 = avaliacaoDe(v, o, i);
+  const av = a0 ? JSON.parse(JSON.stringify(a0)) : { nota: null, danos: [] };
+  Object.assign(av, { indice: i, tramo: e.tramo, elemento: e.elemento });
+  av.descartados = av.descartados || [];
+  const nFoto = k => v.fotos.find(f => f.dano === k)?.n;
+
+  // cada tipo de dano marcado nas fotos deste elemento vira uma linha (uma vez; se você remover, não volta)
+  const mesclarFotos = () => {
+    let novos = 0;
+    for (const f of fotos) for (const tipo of f.danos || []) {
+      const linha = av.danos.find(d => d.tipo === tipo);
+      if (linha) { if (!(linha.fotos || []).includes(f.dano)) linha.fotos = [...(linha.fotos || []), f.dano]; }
+      else if (!av.descartados.includes(tipo)) {
+        av.danos.push({ dano: tipo, quant: null, localizacao: f.onde || null, extensao: null, ec: null,
+          insuficiencia: null, causa: null, fotos: [f.dano], origem: "foto", tipo });
+        novos++;
+      }
+    }
+    return novos;
+  };
+  let fila = Promise.resolve();
+  const salvar = () => {
+    fila = fila.then(async () => {
+      const vv = await BD.ler("vistorias", vid);
+      av.atualizado_em = new Date().toISOString();
+      vv.avaliacao = [...vv.avaliacao.filter(x => !(x.indice === i
+        || (x.indice == null && x.elemento === e.elemento && x.tramo === e.tramo))), JSON.parse(JSON.stringify(av))];
+      vv.atualizado_em = av.atualizado_em;
+      await BD.gravar("vistorias", vv);
+    }).catch(err => { console.error(err); avisar("Não foi possível gravar: " + err.message, 5000); });
+    return fila;
+  };
+  if (mesclarFotos()) salvar();
+
+  const origem = d => d.fotos?.length ? `das fotos ${d.fotos.map(k => nFoto(k) ? `F${pad(nFoto(k))}` : "(excluída)").join(", ")}`
+    : d.origem === "anterior" ? "da vistoria anterior" : "sem foto";
+  const quant = t => /^\s*\d+([.,]\d+)?\s*$/.test(t) ? Number(t.replace(",", ".")) : (t.trim() || null);
+
+  const desenhar = () => {
+    const sug = notaSugerida(av);
+    const alertas = [];
+    av.danos.forEach((d, j) => {
+      if (d.ec == null) alertas.push(`Dano ${j + 1}: falta o EC.`);
+      if (!d.extensao) alertas.push(`Dano ${j + 1}: falta a extensão relativa.`);
+    });
+    const ecs = av.danos.filter(d => d.ec != null).map(d => d.ec);
+    if (av.nota != null && ecs.length && Math.min(...ecs) <= 2 && av.nota >= 4)
+      alertas.push(`Dano com EC ${Math.min(...ecs)} e nota ${av.nota}: conferir a coerência (Anexos C e D).`);
+    if (av.nota != null && av.nota <= 3 && !av.danos.some(d => d.insuficiencia))
+      alertas.push("Nota 3 ou menor indica insuficiência estrutural: descreva-a no dano (pode ser depois, no escritório).");
+    if (av.nota === 5 && av.danos.length) alertas.push("Nota 5 é sem danos (Anexo C), mas há danos registrados.");
+    $("#tela").innerHTML = `
+      <div class="cartao">
+        <h3>Vistoria anterior${o.anterior ? ` (${dataBR(o.anterior.data)})` : ""}</h3>
+        ${ant ? `<p>Nota: <b>${ant.nota != null ? `${ant.nota} – ${NOTAS_NORMA[ant.nota][0]}` : "não informada na ficha"}</b></p>
+          ${ant.dano ? `<p>${esc(ant.dano.dano)}</p><p class="suave">${[ant.dano.quant != null ? `quant. ${ant.dano.quant}` : "", ant.dano.localizacao,
+            ant.dano.extensao, ant.dano.ec ? `EC ${ant.dano.ec} - ${ECS_NORMA[ant.dano.ec]}` : ""].filter(Boolean).map(esc).join(" · ")}</p>`
+            : `<p class="suave">Sem dano registrado.</p>`}
+          <div class="botoes"><button id="copiar" class="botao secundario">Manter como na anterior</button></div>`
+          : `<p class="suave">Este elemento não está na ficha anterior.</p>`}
+      </div>
+      <h2>Fotos de dano deste elemento</h2>
+      ${fotos.length ? `<div class="miniaturas">${fotos.map((f, j) => `<a href="#/dano/${enc(vid)}/${f.dano}"><img src="${minis[j]?.miniatura || ""}" alt="F${pad(f.n)}"><span>F${pad(f.n)}</span></a>`).join("")}</div>` : `<p class="suave">Nenhuma foto de dano deste elemento.</p>`}
+      <div class="botoes"><a class="botao secundario" href="#/dano/${enc(vid)}/novo/-/${i}">+ Foto de dano deste elemento</a></div>
+      <h2>Danos nesta vistoria</h2>
+      ${av.danos.map((d, j) => `
+        <div class="cartao" data-j="${j}">
+          <div class="linha"><strong>Dano ${j + 1}</strong><span class="suave">${esc(origem(d))}</span></div>
+          <label class="campo"><span>Dano</span><textarea data-campo="dano" rows="2">${esc(d.dano || "")}</textarea></label>
+          <div style="display:grid;grid-template-columns:1fr 2fr;gap:8px">
+            <label class="campo" style="margin:0"><span>Quant.</span><input type="text" inputmode="decimal" data-campo="quant" value="${esc(d.quant ?? "")}"></label>
+            <label class="campo" style="margin:0"><span>Localização</span><input type="text" data-campo="localizacao" value="${esc(d.localizacao || "")}"></label>
+          </div>
+          <label class="campo"><span>Extensão relativa</span><select data-campo="extensao"><option value="">—</option>
+            ${EXTENSOES.map(x => `<option ${d.extensao === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
+          <div class="campo"><span>Estado de condição (EC)</span><div class="ecs">${[4, 3, 2, 1].map(n =>
+            `<button class="ec ${d.ec === n ? "marcada" : ""}" data-ec="${n}">${n} - ${ECS_NORMA[n]}</button>`).join("")}</div></div>
+          <details ${d.insuficiencia || d.causa ? "open" : ""}><summary>Insuficiência estrutural e causa provável (opcional)</summary>
+            <label class="campo"><span>Insuficiência estrutural</span><textarea data-campo="insuficiencia" rows="2">${esc(d.insuficiencia || "")}</textarea></label>
+            <label class="campo"><span>Causa provável</span><textarea data-campo="causa" rows="2">${esc(d.causa || "")}</textarea></label>
+          </details>
+          <button class="botao perigo" data-remover="${j}" style="min-height:40px;margin-top:6px">Remover este dano</button>
+        </div>`).join("") || `<div class="vazio">Nenhum dano registrado neste elemento.</div>`}
+      <div class="opcoes"><button id="add-dano" class="botao secundario">+ Dano sem foto</button><button id="sem-dano" class="botao secundario">Sem dano</button></div>
+      <h2>Nota do elemento</h2>
+      <p class="suave">${sug != null ? `Sugerida: <b>${sug} – ${NOTAS_NORMA[sug][0]}</b> ${av.danos.length ? "(menor EC dos danos, no máximo 4)" : "(sem dano)"}.`
+        : "Preencha o EC dos danos para ver a nota sugerida."}</p>
+      <div class="notas">${[5, 4, 3, 2, 1].map(n => `<button class="nota ${av.nota === n ? "marcada" : ""}" data-nota="${n}"><b>${n}</b><span>${NOTAS_NORMA[n][0]}</span></button>`).join("")}</div>
+      <p class="suave" style="margin-top:8px">${av.nota != null ? `<b>${av.nota} – ${NOTAS_NORMA[av.nota][0]}:</b> ${NOTAS_NORMA[av.nota][1]}` : "Toque na nota (Anexo C da DNIT 010/2024-PRO)."}</p>
+      ${alertas.length ? `<div class="cartao" style="border-color:var(--alerta)">${alertas.map(t => `<p>⚠ ${esc(t)}</p>`).join("")}</div>` : ""}
+      <div class="botoes">
+        <button id="concluir" class="botao">Concluir e ir ao próximo</button>
+        <a class="botao secundario" href="#/avaliacao/${enc(vid)}">Voltar à lista</a>
+      </div>`;
+
+    document.querySelectorAll("[data-j]").forEach(cartao => {
+      const d = av.danos[Number(cartao.dataset.j)];
+      cartao.querySelectorAll("[data-campo]").forEach(c => {
+        const campo = c.dataset.campo;
+        if (c.tagName === "SELECT") c.onchange = () => { d[campo] = c.value || null; salvar(); desenhar(); };
+        else {
+          c.oninput = () => { d[campo] = campo === "quant" ? quant(c.value) : (c.value.trim() || null); };
+          c.onchange = salvar;
+        }
+      });
+      cartao.querySelectorAll("[data-ec]").forEach(b => { b.onclick = () => { d.ec = Number(b.dataset.ec); salvar(); desenhar(); }; });
+    });
+    document.querySelectorAll("[data-remover]").forEach(b => {
+      b.onclick = () => {
+        const d = av.danos[Number(b.dataset.remover)];
+        if (!confirm(`Remover o dano "${d.dano || ""}" deste elemento?`)) return;
+        if (d.tipo) av.descartados.push(d.tipo);
+        av.danos.splice(Number(b.dataset.remover), 1);
+        salvar(); desenhar();
+      };
+    });
+    $("#add-dano").onclick = () => {
+      av.danos.push({ dano: "", quant: null, localizacao: null, extensao: null, ec: null, insuficiencia: null, causa: null, fotos: [], origem: "manual" });
+      avisar("Dano sem foto: se possível, registre também a foto do dano.", 4000);
+      salvar(); desenhar();
+      document.querySelector(`[data-j="${av.danos.length - 1}"]`)?.scrollIntoView({ behavior: "smooth" });
+    };
+    $("#sem-dano").onclick = () => {
+      if (fotos.length && !confirm("Este elemento tem foto de dano. Marcar mesmo como sem dano?")) return;
+      if (av.danos.length && !fotos.length && !confirm("Remover os danos registrados e marcar como sem dano?")) return;
+      av.descartados = [...new Set([...av.descartados, ...av.danos.map(d => d.tipo).filter(Boolean)])];
+      av.danos = [];
+      av.nota = 5;
+      salvar(); desenhar();
+    };
+    document.querySelectorAll("[data-nota]").forEach(b => { b.onclick = () => { av.nota = Number(b.dataset.nota); salvar(); desenhar(); }; });
+    if ($("#copiar")) $("#copiar").onclick = () => {
+      if ((av.danos.length || av.nota != null) && !confirm("Substituir o que já foi preenchido pelo que estava na vistoria anterior?")) return;
+      av.nota = ant.nota;
+      av.danos = ant.dano ? [{ ...ant.dano, fotos: [], origem: "anterior" }] : [];
+      av.descartados = [];
+      mesclarFotos();
+      salvar(); desenhar();
+      avisar("Copiado da vistoria anterior. Confira e ajuste o que mudou.", 3500);
+    };
+    $("#concluir").onclick = async () => {
+      if (av.nota == null) return avisar("Escolha a nota do elemento.");
+      if (av.danos.some(d => !d.dano)) return avisar("Descreva o dano (ou remova a linha vazia).");
+      if (av.danos.some(d => d.ec == null || !d.extensao) && !confirm("Há dano sem EC ou sem extensão. Concluir assim mesmo (completar depois)?")) return;
+      await salvar();
+      const vv = await BD.ler("vistorias", vid);
+      const falta = j => avaliacaoDe(vv, o, j)?.nota == null;
+      const prox = o.elementos.findIndex((x, j) => j > i && falta(j));
+      const primeiro = o.elementos.findIndex((x, j) => falta(j));
+      location.hash = prox >= 0 ? `#/elemento/${enc(vid)}/${prox}` : primeiro >= 0 ? `#/elemento/${enc(vid)}/${primeiro}` : `#/avaliacao/${enc(vid)}`;
+    };
+  };
+  desenhar();
 }
 
 /* ---------- instalação e modo offline ---------- */
