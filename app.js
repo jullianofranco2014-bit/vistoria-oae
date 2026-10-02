@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.4.0";
+const VERSAO_APP = "0.4.1";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -645,15 +645,18 @@ const DANOS_POR_TIPO = {
     "Obstrução de drenagem", "Vegetação"],
   madeira: ["Apodrecimento", "Ataque de cupins/insetos", "Fissuras/rachaduras", "Peças soltas ou faltando", "Desgaste", "Umidade", "Fungos"],
   metalico: ["Corrosão", "Perda de seção", "Pintura deteriorada", "Deformação/amassamento", "Ligações/parafusos soltos", "Colisão", "Sujidade"],
+  drenagem: ["Obstruído/entupido", "Danificado/quebrado", "Ausente", "Tubo curto (água escorre na estrutura)",
+    "Manchas/infiltração no entorno", "Vegetação"],
 };
 const NOME_TIPO = { concreto_super: "superestrutura de concreto", concreto_meso: "meso/infraestrutura de concreto",
   aparelho: "aparelho de apoio", junta: "junta", pavimento: "pavimento", protecao: "guarda-corpo, barreira e calçada",
-  acesso: "acesso/aterro", madeira: "madeira", metalico: "elemento metálico" };
+  acesso: "acesso/aterro", madeira: "madeira", metalico: "elemento metálico", drenagem: "buzinote/dreno" };
 const DANOS = [...new Set(Object.values(DANOS_POR_TIPO).flat())];   // todos ("ver todos")
 
 /* tipo do elemento, pelo código e pela descrição da ficha */
 function tipoElemento(e) {
   const c = e.elemento.replace(/\d.*$/, ""), d = (e.detalhe || "").toUpperCase();
+  if (/^DR$/.test(c) || /BUZINOTE|DRENO/.test(d)) return "drenagem";
   if (/MADEIRA/.test(d)) return "madeira";
   if (/^J$/.test(c) || /JUNTA/.test(d)) return "junta";
   if (/^N$/.test(c) || /NEOPRENE|APARELHO/.test(d)) return "aparelho";
@@ -1047,7 +1050,7 @@ async function telaAvaliacao(vid) {
   const prox = avs.findIndex(a => a?.nota == null);
   let html = "", grupo = null;
   o.elementos.forEach((e, i) => {
-    const g = o.tramos.length > 1 ? `Tramo ${e.tramo}` : "Elementos";
+    const g = e.grupo || (o.tramos.length > 1 ? `Tramo ${e.tramo}` : "Elementos");   // DR1 (buzinotes): "Complementar"
     if (g !== grupo) { grupo = g; html += `<h2>${esc(g)}</h2>`; }
     const a = avs[i], ant = o.anterior?.elementos?.[i], nf = fotosDoElemento(v, o, i).length, nd = a?.danos?.length || 0;
     html += `<a class="lista-item linha" href="#/elemento/${enc(vid)}/${i}" style="align-items:center">
@@ -1074,13 +1077,16 @@ async function telaElemento(vid, i) {
   if (!e) { location.hash = o ? `#/avaliacao/${enc(vid)}` : "#/"; return; }
   const nomes = nomesElementos(o);
   cabecalho(`${nomes[i].split(" – ")[0]} · avaliação`, `${e.detalhe || ""}${o.tramos.length > 1 ? ` · tramo ${e.tramo}` : ""}`, `#/avaliacao/${enc(vid)}`);
-  const ant = o.anterior?.elementos?.[i] || null;
+  const ant = e.novo_desde ? null : o.anterior?.elementos?.[i] || null;   // elemento novo (DR1) não tem anterior
   const fotos = fotosDoElemento(v, o, i);
   const minis = await Promise.all(fotos.map(f => BD.ler("fotos", `${vid}#D${f.dano}`)));
   const a0 = avaliacaoDe(v, o, i);
   const av = a0 ? JSON.parse(JSON.stringify(a0)) : { nota: null, danos: [] };
   Object.assign(av, { indice: i, tramo: e.tramo, elemento: e.elemento });
   av.descartados = av.descartados || [];
+  // buzinotes (DR1): quantidade existente (do SGE, quando houver) e danificada (usuário, 02/10/2026)
+  const buzinote = tipoElemento(e) === "drenagem";
+  if (buzinote && av.existentes === undefined) av.existentes = e.quantidade ?? null;
   const nFoto = k => v.fotos.find(f => f.dano === k)?.n;
 
   // cada tipo de dano marcado nas fotos deste elemento vira uma linha (uma vez; se você remover, não volta)
@@ -1128,6 +1134,12 @@ async function telaElemento(vid, i) {
     if (av.nota != null && av.nota <= 3 && !av.danos.some(d => d.insuficiencia))
       alertas.push("Nota 3 ou menor indica insuficiência estrutural: descreva-a no dano (pode ser depois, no escritório).");
     if (av.nota === 5 && av.danos.length) alertas.push("Nota 5 é sem danos (Anexo C), mas há danos registrados.");
+    if (buzinote) {
+      if (av.existentes == null) alertas.push("Informe a quantidade de buzinotes existentes.");
+      if (av.danificados != null && av.existentes != null && av.danificados > av.existentes)
+        alertas.push("Há mais buzinotes danificados do que existentes.");
+      if (av.danificados > 0 && !av.danos.length) alertas.push("Há buzinotes danificados: registre o dano (tipo) deles.");
+    }
     $("#tela").innerHTML = `
       <div class="cartao">
         <h3>Vistoria anterior${o.anterior ? ` (${dataBR(o.anterior.data)})` : ""}</h3>
@@ -1136,8 +1148,15 @@ async function telaElemento(vid, i) {
             ant.dano.extensao, ant.dano.ec ? `EC ${ant.dano.ec} - ${ECS_NORMA[ant.dano.ec]}` : ""].filter(Boolean).map(esc).join(" · ")}</p>`
             : `<p class="suave">Sem dano registrado.</p>`}
           <div class="botoes"><button id="copiar" class="botao secundario">Manter como na anterior</button></div>`
-          : `<p class="suave">Este elemento não está na ficha anterior.</p>`}
+          : `<p class="suave">${e.novo_desde ? "Elemento novo: separado a partir desta vistoria (antes ficava dentro da laje)." : "Este elemento não está na ficha anterior."}</p>`}
       </div>
+      ${buzinote ? `<div class="cartao"><h3>Quantidade de buzinotes</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <label class="campo" style="margin:0"><span>Existentes${e.quantidade ? ` (SGE: ${e.quantidade})` : ""}</span>
+            <input id="bz-exist" type="text" inputmode="numeric" value="${esc(av.existentes ?? "")}"></label>
+          <label class="campo" style="margin:0"><span>Danificados</span>
+            <input id="bz-dan" type="text" inputmode="numeric" value="${esc(av.danificados ?? "")}"></label>
+        </div></div>` : ""}
       <h2>Fotos de dano deste elemento</h2>
       ${fotos.length ? `<div class="miniaturas">${fotos.map((f, j) => `<a href="#/dano/${enc(vid)}/${f.dano}"><img src="${minis[j]?.miniatura || ""}" alt="F${pad(f.n)}"><span>F${pad(f.n)}</span></a>`).join("")}</div>` : `<p class="suave">Nenhuma foto de dano deste elemento.</p>`}
       <div class="botoes"><a class="botao secundario" href="#/dano/${enc(vid)}/novo/-/${i}">+ Foto de dano deste elemento</a></div>
@@ -1184,6 +1203,10 @@ async function telaElemento(vid, i) {
       });
       cartao.querySelectorAll("[data-ec]").forEach(b => { b.onclick = () => { d.ec = Number(b.dataset.ec); salvar(); desenhar(); }; });
     });
+    if (buzinote) for (const [id, campo] of [["#bz-exist", "existentes"], ["#bz-dan", "danificados"]]) {
+      $(id).oninput = ev => { const t = ev.target.value.trim(); av[campo] = /^\d+$/.test(t) ? Number(t) : null; };
+      $(id).onchange = () => { salvar(); desenhar(); };
+    }
     document.querySelectorAll("[data-remover]").forEach(b => {
       b.onclick = () => {
         const d = av.danos[Number(b.dataset.remover)];
