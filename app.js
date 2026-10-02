@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.4.2";
+const VERSAO_APP = "0.5.1";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -137,6 +137,7 @@ async function rotear() {
     if (rota === "dano" && arg) return telaDano(decodeURIComponent(arg), partes[2], partes[3] && partes[3] !== "-" ? Number(partes[3]) : null,
       false, partes[4] != null ? Number(partes[4]) : null);
     if (rota === "avaliacao" && arg) return telaAvaliacao(decodeURIComponent(arg));
+    if (rota === "anotacoes" && arg) return telaAnotacoes(decodeURIComponent(arg));
     if (rota === "elemento" && arg) return telaElemento(decodeURIComponent(arg), Number(partes[2]));
     // #/extra/<vistoria>/novo[/<foto do roteiro>]: foto extra (vista complementar, sem dano)
     if (rota === "extra" && arg) return telaDano(decodeURIComponent(arg), "novo", partes[3] ? Number(partes[3]) : null, true);
@@ -305,6 +306,8 @@ async function telaVistoria(id) {
   const feitas = o.roteiro.filter(r => st[r.n]).length;
   const nExtras = v.fotos.filter(f => f.dano && ehExtra(f)).length, nDanos = v.fotos.filter(f => f.dano).length - nExtras;
   const nAvaliados = v.avaliacao.filter(a => a.nota != null).length;
+  const an = v.anotacoes || {};
+  const temAnotacoes = !!(an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes);
   // [título, texto, parte futura, link, selo, selo ok?]
   const etapas = [
     ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${enc(v.id)}`,
@@ -312,7 +315,8 @@ async function telaVistoria(id) {
     ["Fotos de dano e extras", `${nDanos} de dano · ${nExtras} extra(s)`, null, `#/danos/${enc(v.id)}`, "abrir ›", false],
     ["Avaliação dos elementos", `${nAvaliados} de ${o.elementos.length} elementos avaliados · nota e danos`, null,
       `#/avaliacao/${enc(v.id)}`, nAvaliados === o.elementos.length ? "concluído" : "abrir ›", nAvaliados === o.elementos.length],
-    ["Textos e laudo", "Aspectos especiais, deficiências, observações e laudo", "parte 5"],
+    ["Anotações de campo", "Aspectos especiais, deficiências e observações (os textos da ficha são redigidos depois)", null,
+      `#/anotacoes/${enc(v.id)}`, temAnotacoes ? "anotado" : "abrir ›", temAnotacoes],
     ["Exportar", "Pacote para o computador (JSON + fotos)", "parte 6"],
   ];
   const desenhar = () => {
@@ -1257,6 +1261,65 @@ async function telaElemento(vid, i) {
     };
   };
   desenhar();
+}
+
+/* ---------- anotações de campo (parte 5) ----------
+ * Só o que precisa ser visto no local. Os textos da ficha (observação do Anexo B, aspectos especiais, deficiências
+ * funcionais e laudo com a nota final) são redigidos depois, no computador, a partir da vistoria exportada
+ * (decisão do usuário, 02/10/2026). Ficam em v.anotacoes, separados dos campos finais da ficha. */
+const ASPECTOS = ["Acesso difícil", "Nível d'água alto", "Vegetação densa", "Elemento encoberto ou sem acesso",
+  "Obras próximas", "Tráfego intenso", "Chuva durante a vistoria"];
+const DEFICIENCIAS = ["Ponte sem acostamento", "Pista mais estreita que a rodovia", "Calçada para pedestres inexistente",
+  "Guarda-corpo ausente ou inadequado", "Defensa ausente nos acessos", "Sinalização deficiente",
+  "Gabarito insuficiente", "Drenagem da pista deficiente (acúmulo de água)", "Degrau/recalque na transição com o aterro",
+  "Iluminação inexistente ou deficiente"];
+
+async function telaAnotacoes(vid) {
+  const v = await BD.ler("vistorias", vid);
+  const o = v && Estado.oaes.get(v.oae);
+  if (!o) { location.hash = "#/"; return; }
+  cabecalho("Anotações de campo", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
+  const a = { aspectos: [], aspectos_texto: "", deficiencias: [], deficiencias_texto: "", observacoes: "", ...(v.anotacoes || {}) };
+  let fila = Promise.resolve();
+  const salvar = () => {
+    fila = fila.then(async () => {
+      const vv = await BD.ler("vistorias", vid);
+      vv.anotacoes = { ...a, atualizado_em: new Date().toISOString() };
+      vv.atualizado_em = vv.anotacoes.atualizado_em;
+      await BD.gravar("vistorias", vv);
+    }).catch(e => { console.error(e); avisar("Não foi possível gravar: " + e.message, 5000); });
+  };
+  const fichas = (id, lista, marcados) => `<div class="fichas" id="${id}">${[...new Set([...lista, ...marcados])].map(t => `
+    <label><input type="checkbox" value="${esc(t)}" ${marcados.includes(t) ? "checked" : ""}><span>${esc(t)}</span></label>`).join("")}</div>`;
+  const ant = o.anterior;
+  $("#tela").innerHTML = `
+    <div class="cartao"><p>Anote aqui só o que precisa ser visto no local. Os textos da ficha (observação, aspectos
+      especiais, deficiências e o laudo com a nota final) serão redigidos depois, no computador, a partir da vistoria
+      exportada. O ditado por voz do teclado funciona nos campos de texto.</p></div>
+    <h2>Aspectos especiais</h2>
+    ${fichas("aspectos", ASPECTOS, a.aspectos)}
+    <label class="campo"><span>Detalhes (opcional)</span>
+      <textarea id="aspectos-texto" rows="2" placeholder="Ex.: encontro E1 encoberto por solo; acesso ao LD só pela margem">${esc(a.aspectos_texto)}</textarea></label>
+    <h2>Deficiências funcionais</h2>
+    ${fichas("deficiencias", DEFICIENCIAS, a.deficiencias)}
+    <label class="campo"><span>Outras / detalhes (opcional)</span>
+      <textarea id="deficiencias-texto" rows="2" placeholder="Ex.: defensa ausente só no acesso do E2, lado LD">${esc(a.deficiencias_texto)}</textarea></label>
+    <h2>Observações para o laudo</h2>
+    <label class="campo"><span>O que você quer que conste no laudo (opcional)</span>
+      <textarea id="observacoes" rows="4" placeholder="Ex.: erosão no aterro do A2 avançou desde a vistoria anterior">${esc(a.observacoes)}</textarea></label>
+    ${ant ? `<h2>Vistoria anterior (${dataBR(ant.data)})</h2>
+      <details class="cartao"><summary>Observação do Anexo B</summary><p style="white-space:pre-wrap">${esc(ant.observacao || "—")}</p></details>
+      <details class="cartao"><summary>Laudo</summary><p style="white-space:pre-wrap">${esc(ant.laudo || "—")}</p></details>` : ""}
+    <div class="botoes"><a class="botao" href="#/vistoria/${enc(vid)}">Concluir</a></div>`;
+  for (const [id, campo] of [["aspectos", "aspectos"], ["deficiencias", "deficiencias"]]) {
+    document.querySelectorAll(`#${id} input`).forEach(i => {
+      i.onchange = () => { a[campo] = [...document.querySelectorAll(`#${id} input:checked`)].map(x => x.value); salvar(); };
+    });
+  }
+  for (const [id, campo] of [["#aspectos-texto", "aspectos_texto"], ["#deficiencias-texto", "deficiencias_texto"], ["#observacoes", "observacoes"]]) {
+    $(id).oninput = ev => { a[campo] = ev.target.value; };
+    $(id).onchange = salvar;
+  }
 }
 
 /* ---------- instalação e modo offline ---------- */
