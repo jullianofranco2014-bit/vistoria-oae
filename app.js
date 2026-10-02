@@ -4,10 +4,13 @@
  *
  * Parte 1: dados das OAEs, escolha da OAE (mais próxima pelo GPS), abertura da vistoria e tela de etapas.
  * Parte 2: roteiro de fotos — câmera do celular, GPS, bússola e posição no mini-croqui.
+ * Parte 3: fotos de dano — vinculadas a um elemento, com posição e direção marcadas no croqui; tiradas da
+ *          própria foto do roteiro ("+ Dano aqui") ou avulsas. No relatório, cada foto de dano vem logo depois
+ *          da foto do roteiro em que foi tirada; as avulsas vão para o fim.
  */
 "use strict";
 
-const VERSAO_APP = "0.2.4";
+const VERSAO_APP = "0.3.0";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -47,6 +50,8 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const num = (v, casas = 2) => v == null || v === "" ? "–" : Number(v).toLocaleString("pt-BR", { minimumFractionDigits: casas, maximumFractionDigits: casas });
 const hoje = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
 const dataBR = iso => iso ? iso.split("-").reverse().join("/") : "";
+const pad = n => String(n).padStart(2, "0");
+const enc = encodeURIComponent;
 
 function distanciaM(lat1, lon1, lat2, lon2) {
   const R = 6371000, r = Math.PI / 180;
@@ -118,13 +123,17 @@ function cabecalho(titulo, subtitulo, voltar) {
 async function rotear() {
   if (desligarGPS) { desligarGPS(); desligarGPS = null; }
   window.scrollTo(0, 0);
-  const [rota, arg] = location.hash.replace(/^#\/?/, "").split("/");
+  const partes = location.hash.replace(/^#\/?/, "").split("/");
+  const [rota, arg] = partes;
   try {
     if (!Estado.pacote && rota !== "dados") return telaDados(true);
     if (rota === "nova") return telaNova();
     if (rota === "vistoria" && arg) return telaVistoria(decodeURIComponent(arg));
     if (rota === "roteiro" && arg) return telaRoteiro(decodeURIComponent(arg));
-    if (rota === "foto" && arg) return telaFoto(decodeURIComponent(arg), Number(location.hash.split("/").pop()));
+    if (rota === "foto" && arg) return telaFoto(decodeURIComponent(arg), Number(partes[2]));
+    if (rota === "danos" && arg) return telaDanos(decodeURIComponent(arg));
+    // #/dano/<vistoria>/<nº do dano ou "novo">[/<foto do roteiro em que foi visto>]
+    if (rota === "dano" && arg) return telaDano(decodeURIComponent(arg), partes[2], partes[3] ? Number(partes[3]) : null);
     if (rota === "dados") return telaDados(false);
     return telaInicio();
   } catch (e) {
@@ -288,9 +297,12 @@ async function telaVistoria(id) {
   GPS.iniciar();
   const st = v.roteiro_status || {};
   const feitas = o.roteiro.filter(r => st[r.n]).length;
+  const nDanos = v.fotos.filter(f => f.dano).length;
+  // [título, texto, parte futura, link, selo, selo ok?]
   const etapas = [
-    ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${encodeURIComponent(v.id)}`],
-    ["Fotos de dano", "Fotos extras vinculadas ao elemento", "parte 3"],
+    ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${enc(v.id)}`,
+      feitas === o.roteiro.length ? "concluído" : "abrir ›", feitas === o.roteiro.length],
+    ["Fotos de dano", `${nDanos} foto(s) · vinculadas ao elemento`, null, `#/danos/${enc(v.id)}`, "abrir ›", false],
     ["Avaliação dos elementos", `${o.elementos.length} elementos · nota e danos`, "parte 4"],
     ["Textos e laudo", "Aspectos especiais, deficiências, observações e laudo", "parte 5"],
     ["Exportar", "Pacote para o computador (JSON + fotos)", "parte 6"],
@@ -302,10 +314,10 @@ async function telaVistoria(id) {
       ${GPS.html()}
       ${d != null && d > 500 ? `<div class="cartao" style="border-color:var(--alerta)"><p><b>Atenção:</b> você está a ${textoDist(d)} da coordenada cadastrada desta OAE. Confira se é a OAE certa.</p></div>` : ""}
       <h2>Etapas da vistoria</h2>
-      ${etapas.map(([t, s, parte, link], k) => link ? `
+      ${etapas.map(([t, s, parte, link, selo, ok], k) => link ? `
         <a class="cartao etapa lista-item" href="${link}"><span class="num">${k + 1}</span>
           <div class="texto"><strong>${t}</strong><div class="suave">${s}</div></div>
-          <span class="selo ${feitas === o.roteiro.length ? "ok" : ""}">${feitas === o.roteiro.length ? "concluído" : "abrir ›"}</span></a>` : `
+          <span class="selo ${ok ? "ok" : ""}">${selo}</span></a>` : `
         <div class="cartao etapa futura"><span class="num">${k + 1}</span>
           <div class="texto"><strong>${t}</strong><div class="suave">${s}</div></div>
           <span class="selo alerta">${parte}</span></div>`).join("")}
@@ -394,37 +406,62 @@ function textoPosicao(r, L) {
   return `${onde}, ${lado}`;
 }
 
-/* mini-croqui: LE em cima, LD embaixo, sentido crescente para a direita (mesma convenção do croqui.py) */
-function miniCroqui(o, roteiro, atual, status) {
+/* mini-croqui: LE em cima, LD embaixo, sentido crescente para a direita (mesma convenção do croqui.py).
+ * geoCroqui: escala do desenho (px/py: metros e fração da largura -> tela; ix/iy: o inverso, para o toque). */
+function geoCroqui(o, pontos, { H = 165, yt = 50, yb = 116 } = {}) {
   const ext = o.tramos.map(t => t.extensao_m || 0), L = ext.reduce((a, b) => a + b, 0) || o.comprimento_m || 10;
-  const W = 340, H = 165, m = 22, x0 = m + 18, x1 = W - m - 18, yt = 50, yb = 116;
-  const xmin = Math.min(-12, ...roteiro.map(r => r.x)), xmax = Math.max(L + 12, ...roteiro.map(r => r.x));
-  const px = x => x0 + (x - xmin) / (xmax - xmin) * (x1 - x0), py = y => yt + (yb - yt) * y;
-  let apoios = "", acum = 0;
-  ext.slice(0, -1).forEach(e => { acum += e; apoios += `<line x1="${px(acum)}" y1="${yt}" x2="${px(acum)}" y2="${yb}" stroke="#8a94a3" stroke-dasharray="3 3"/>`; });
-  /* foto atual: ponto + seta de ponta cheia (mesmo símbolo do croqui da ficha); sem direção, só o ponto vazado */
-  const marcador = (r, cor) => {
-    const cx = px(r.x), cy = py(r.y);
-    if (r.direcao == null) return `<circle cx="${cx}" cy="${cy}" r="5" fill="#fff" stroke="${cor}" stroke-width="2.5"/>`;
-    const a = r.direcao * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
-    const p = (u, v) => `${cx + u * c - v * s},${cy + u * s + v * c}`;
-    return `<line x1="${cx}" y1="${cy}" x2="${cx + 24 * c}" y2="${cy + 24 * s}" stroke="${cor}" stroke-width="3"/>
-      <polygon points="${p(34, 0)} ${p(22, -6)} ${p(22, 6)}" fill="${cor}"/>
-      <circle cx="${cx}" cy="${cy}" r="5" fill="${cor}"/>`;
+  const W = 340, x0 = 40, x1 = W - 40;
+  const xs = pontos.map(r => r.x).filter(x => x != null);
+  const xmin = Math.min(-12, ...xs), xmax = Math.max(L + 12, ...xs);
+  return {
+    ext, L, W, H, yt, yb,
+    px: x => x0 + (x - xmin) / (xmax - xmin) * (x1 - x0), py: y => yt + (yb - yt) * y,
+    ix: X => xmin + (X - x0) / (x1 - x0) * (xmax - xmin), iy: Y => (Y - yt) / (yb - yt),
   };
-  const pontos = roteiro.filter(r => r.n !== atual.n).map(r =>
-    `<circle cx="${px(r.x)}" cy="${py(r.y)}" r="3.5" fill="${status[r.n] ? "#1d7a3e" : "#c3cad4"}"/>`).join("");
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Posição da foto no croqui da OAE" style="background:#fff;border:1px solid var(--borda);border-radius:10px">
-    <text x="${W / 2}" y="18" text-anchor="middle" font-size="11" fill="#5a6472">sentido crescente →</text>
-    <rect x="${px(0)}" y="${yt}" width="${px(L) - px(0)}" height="${yb - yt}" fill="#eef2f7" stroke="#14181f"/>
+}
+
+function fundoCroqui(g) {
+  let apoios = "", acum = 0;
+  g.ext.slice(0, -1).forEach(e => { acum += e; apoios += `<line x1="${g.px(acum)}" y1="${g.yt}" x2="${g.px(acum)}" y2="${g.yb}" stroke="#8a94a3" stroke-dasharray="3 3"/>`; });
+  return `<text x="${g.W / 2}" y="18" text-anchor="middle" font-size="11" fill="#5a6472">sentido crescente →</text>
+    <rect x="${g.px(0)}" y="${g.yt}" width="${g.px(g.L) - g.px(0)}" height="${g.yb - g.yt}" fill="#eef2f7" stroke="#14181f"/>
     ${apoios}
-    <text x="${px(0) - 4}" y="${yt - 6}" font-size="10" text-anchor="end" fill="#5a6472">E1</text>
-    <text x="${px(L) + 4}" y="${yt - 6}" font-size="10" fill="#5a6472">E2</text>
-    <text x="8" y="${yt + 4}" font-size="11" font-weight="700" fill="#5a6472">LE</text>
-    <text x="8" y="${yb + 4}" font-size="11" font-weight="700" fill="#5a6472">LD</text>
+    <text x="${g.px(0) - 4}" y="${g.yt - 6}" font-size="10" text-anchor="end" fill="#5a6472">E1</text>
+    <text x="${g.px(g.L) + 4}" y="${g.yt - 6}" font-size="10" fill="#5a6472">E2</text>
+    <text x="8" y="${g.yt + 4}" font-size="11" font-weight="700" fill="#5a6472">LE</text>
+    <text x="8" y="${g.yb + 4}" font-size="11" font-weight="700" fill="#5a6472">LD</text>`;
+}
+
+/* foto: ponto + seta de ponta cheia (mesmo símbolo do croqui da ficha); sem direção, só o ponto vazado */
+function marcaFoto(g, r, cor) {
+  const cx = g.px(r.x), cy = g.py(r.y);
+  if (r.direcao == null) return `<circle cx="${cx}" cy="${cy}" r="5" fill="#fff" stroke="${cor}" stroke-width="2.5"/>`;
+  const a = r.direcao * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  const p = (u, v) => `${cx + u * c - v * s},${cy + u * s + v * c}`;
+  return `<line x1="${cx}" y1="${cy}" x2="${cx + 24 * c}" y2="${cy + 24 * s}" stroke="${cor}" stroke-width="3"/>
+    <polygon points="${p(34, 0)} ${p(22, -6)} ${p(22, 6)}" fill="${cor}"/>
+    <circle cx="${cx}" cy="${cy}" r="5" fill="${cor}"/>`;
+}
+
+function miniCroqui(o, roteiro, atual, status) {
+  const g = geoCroqui(o, roteiro);
+  const pontos = roteiro.filter(r => r.n !== atual.n).map(r =>
+    `<circle cx="${g.px(r.x)}" cy="${g.py(r.y)}" r="3.5" fill="${status[r.n] ? "#1d7a3e" : "#c3cad4"}"/>`).join("");
+  return `<svg viewBox="0 0 ${g.W} ${g.H}" width="100%" role="img" aria-label="Posição da foto no croqui da OAE" style="background:#fff;border:1px solid var(--borda);border-radius:10px">
+    ${fundoCroqui(g)}
     ${pontos}
-    ${marcador(atual, "#b42318")}
+    ${marcaFoto(g, atual, "#b42318")}
   </svg>`;
+}
+
+/* numeração das fotos no relatório: a ordem do roteiro, cada foto de dano logo depois da foto do roteiro em que
+ * foi tirada (na ordem em que foram tiradas) e as fotos de dano avulsas no fim */
+function renumerar(v, o) {
+  const ordem = new Map(o.roteiro.map((r, i) => [r.n, i]));
+  const chave = f => f.roteiro != null ? [ordem.get(f.roteiro) ?? 1e4, 0, 0]
+    : [f.perto_de != null ? ordem.get(f.perto_de) ?? 1e4 : 1e5, 1, f.dano || 0];
+  v.fotos.sort((a, b) => { const p = chave(a), q = chave(b); return p[0] - q[0] || p[1] - q[1] || p[2] - q[2]; });
+  v.fotos.forEach((f, i) => { f.n = i + 1; });
 }
 
 /* ---------- tela: roteiro de fotos ---------- */
@@ -441,11 +478,12 @@ async function telaRoteiro(vid) {
   for (const r of o.roteiro) {
     if (r.grupo !== grupo) { grupo = r.grupo; html += `<h2>${esc(grupo)}</h2>`; }
     const f = fotos.get(r.n), s = st[r.n];
+    const nd = v.fotos.filter(x => x.dano && x.perto_de === r.n).length;
     html += `<a class="lista-item linha" href="#/foto/${encodeURIComponent(vid)}/${r.n}" style="align-items:center">
       ${f ? `<img src="${f.miniatura}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;flex:none">`
           : `<span style="width:64px;height:48px;border-radius:6px;flex:none;display:grid;place-items:center;background:#eef2f7;color:#5a6472;font-weight:700">R${String(r.n).padStart(2, "0")}</span>`}
       <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(r.legenda)}</span>
-        <span class="detalhe" style="display:block">${DIRECAO[r.direcao] || ""}${r.elemento ? ` · ${esc(r.elemento)}` : ""}</span></span>
+        <span class="detalhe" style="display:block">${DIRECAO[r.direcao] || ""}${r.elemento ? ` · ${esc(r.elemento)}` : ""}${nd ? ` · <b style="color:var(--erro)">${nd} dano(s)</b>` : ""}</span></span>
       <span class="selo ${s === "feita" ? "ok" : s === "pulada" ? "alerta" : ""}">${s === "feita" ? "✓" : s === "pulada" ? "n/a" : "›"}</span></a>`;
   }
   const prox = o.roteiro.find(r => !st[r.n]);
@@ -473,6 +511,9 @@ async function telaFoto(vid, n) {
   const reg = v.fotos.find(f => f.roteiro === n);
   const i = o.roteiro.indexOf(r), ant = o.roteiro[i - 1], prox = o.roteiro[i + 1];
   const url = foto ? URL.createObjectURL(foto.blob) : null;
+  // danos vistos nesta foto do roteiro (tirados pelo "+ Dano aqui")
+  const danosAqui = v.fotos.filter(f => f.dano && f.perto_de === n);
+  const minisDano = await Promise.all(danosAqui.map(d => BD.ler("fotos", `${vid}#D${d.dano}`)));
   $("#tela").innerHTML = `
     <div class="cartao">
       <h3>${esc(r.legenda)}</h3>
@@ -487,13 +528,20 @@ async function telaFoto(vid, n) {
         : `<span style="color:var(--alerta)">sem GPS — refaça a foto com a localização ligada</span>`}${reg.azimute != null ? ` · bússola ${rumo(reg.azimute)}` : ""}` : ""}</p></div>` : ""}
     ${st[n] === "pulada" ? `<div class="cartao" style="border-color:var(--alerta)"><b>Marcada como não se aplica:</b> ${esc((v.roteiro_motivos || {})[n] || "")}</div>` : ""}
     <div class="botoes">
-      <label class="botao">${foto ? "Refazer foto" : "Tirar foto"}
+      <label class="botao ${foto ? "secundario" : ""}">${foto ? "Refazer foto" : "Tirar foto"}
         <input id="camera" type="file" accept="image/*" capture="environment" hidden></label>
+      <a class="botao secundario" style="border-color:var(--erro);color:var(--erro)" href="#/dano/${enc(vid)}/novo/${n}">+ Dano aqui</a>
     </div>
+    ${danosAqui.length ? `<h2>Danos vistos nesta foto</h2>${danosAqui.map((d, j) => `
+      <a class="lista-item linha" href="#/dano/${enc(vid)}/${d.dano}" style="align-items:center">
+        <img src="${minisDano[j]?.miniatura || ""}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;flex:none">
+        <span style="flex:1;min-width:0"><span class="nome" style="font-size:.9rem">F${pad(d.n)} · ${esc(d.legenda || "(sem legenda)")}</span></span>
+        <span class="selo">editar</span></a>`).join("")}` : ""}
     <label class="campo"><span>Observação (opcional)</span>
       <textarea id="obs" rows="2" placeholder="Ex.: acesso difícil, foto tirada pelo LE">${esc(reg?.obs || "")}</textarea></label>
     <div class="botoes">
       ${st[n] !== "pulada" && !foto ? `<button id="pular" class="botao secundario">Não se aplica nesta OAE</button>` : ""}
+      ${foto ? `<a class="botao" href="${prox ? `#/foto/${enc(vid)}/${prox.n}` : `#/roteiro/${enc(vid)}`}">${prox ? `Próxima foto: R${pad(prox.n)} ›` : "Voltar ao roteiro"}</a>` : ""}
       <div class="opcoes">
         <button class="botao secundario" ${ant ? "" : "disabled"} onclick="location.hash='#/foto/${encodeURIComponent(vid)}/${ant ? ant.n : n}'">‹ Anterior</button>
         <button class="botao secundario" ${prox ? "" : "disabled"} onclick="location.hash='#/foto/${encodeURIComponent(vid)}/${prox ? prox.n : n}'">Próxima ›</button>
@@ -537,7 +585,8 @@ async function telaFoto(vid, n) {
       azimute: azimute != null ? Math.round(azimute) : null, bussola_confiavel: bussolaOk,
       data_hora: agora.toISOString().slice(0, 19), obs: $("#obs").value.trim(),
     };
-    vv.fotos = [...vv.fotos.filter(f => f.roteiro !== n), registro].sort((a, b) => (a.roteiro ?? 999) - (b.roteiro ?? 999));
+    vv.fotos = [...vv.fotos.filter(f => f.roteiro !== n), registro];
+    renumerar(vv, o);
     vv.roteiro_status = { ...(vv.roteiro_status || {}), [n]: "feita" };
     if (vv.roteiro_motivos) delete vv.roteiro_motivos[n];
     vv.atualizado_em = new Date().toISOString();
@@ -545,8 +594,303 @@ async function telaFoto(vid, n) {
     if (!pos) avisar("Foto salva, mas sem GPS. Confira a localização do celular.", 5000);
     else if (pos.prec > 30) avisar(`Foto salva com GPS fraco (±${Math.round(pos.prec)} m).`, 4000);
     else avisar("Foto salva.", 1500);
-    location.hash = prox ? `#/foto/${encodeURIComponent(vid)}/${prox.n}` : `#/roteiro/${encodeURIComponent(vid)}`;
+    // fica na mesma foto (para conferir e, se houver dano, usar o "+ Dano aqui"); "Próxima foto" segue o roteiro
+    rotear();
   };
+}
+
+/* ---------- fotos de dano ---------- */
+// termos da planilha de patologias da equipe (Resumo das Patologias e Intervenções), aprovados pelo usuário
+const DANOS = ["Fissuras", "Trincas", "Armadura exposta", "Corrosão", "Desagregação", "Desplacamento",
+  "Lixiviação/eflorescência", "Infiltração/umidade", "Manchas", "Carbonatação", "Ninhos de concretagem", "Erosão",
+  "Obstrução de drenos/buzinotes", "Junta danificada", "Pavimento com desgaste/panelas", "Guarda-corpo danificado",
+  "Defensa danificada/ausente", "Vegetação", "Sujidade", "Pichação", "Colisão"];
+const REGIOES = ["Superestrutura", "Mesoestrutura", "Infraestrutura", "Transição"];
+const chaveEl = e => `${e.elemento}|${e.tramo}`;
+
+function tramoDe(o, x) {
+  let acum = 0;
+  for (const t of o.tramos) { acum += t.extensao_m || 0; if (x < acum) return t.numero; }
+  return o.tramos.length ? o.tramos[o.tramos.length - 1].numero : 1;
+}
+function centroTramo(o, numero) {
+  let acum = 0;
+  for (const t of o.tramos) { if (t.numero === numero) return acum + (t.extensao_m || 0) / 2; acum += t.extensao_m || 0; }
+  return acum / 2;
+}
+
+/* elementos sugeridos para um dano visto numa foto do roteiro: os códigos citados na legenda (ex.: "APOIO 1: P1 E P2")
+ * e, se a foto é de um tramo, a laje, as longarinas e as transversinas dele */
+function sugestoes(o, r) {
+  if (!r) return [];
+  const t = tramoDe(o, Math.max(0, r.x));
+  const lista = [];
+  for (const c of new Set(`${r.legenda} ${r.elemento || ""}`.match(/\b[A-Z]{1,3}\d+\b/g) || [])) {
+    const es = o.elementos.filter(e => e.elemento === c);
+    if (es.length) lista.push(es.find(e => e.tramo === t) || es[0]);
+  }
+  const m = /TRAMO (\d+)/.exec(r.legenda);
+  if (m) lista.push(...o.elementos.filter(e => e.tramo === Number(m[1]) && /^(L|V|T)\d+$/.test(e.elemento)));
+  const vistos = new Set();
+  return lista.filter(e => !vistos.has(chaveEl(e)) && vistos.add(chaveEl(e))).slice(0, 10);
+}
+
+/* legenda automática: "PILAR EM COLUNAS DE CONCRETO ARMADO (P1, TRAMO 1): ARMADURA EXPOSTA E CORROSÃO – FACE DO LD" */
+function montarLegenda(o, el, danos, onde) {
+  if (!el) return "";
+  const d = danos.map(x => x.toUpperCase());
+  const lista = d.length > 1 ? `${d.slice(0, -1).join(", ")} E ${d[d.length - 1]}` : d.join("");
+  const tramo = o.tramos.length > 1 && el.tramo ? `, TRAMO ${el.tramo}` : "";
+  return `${el.detalhe ? `${el.detalhe.toUpperCase()} ` : ""}(${el.elemento}${tramo})${lista ? `: ${lista}` : ""}`
+    + (onde.trim() ? ` – ${onde.trim().toUpperCase()}` : "");
+}
+
+const danoCompleto = d => d.elemento && d.posicao_marcada && (d.danos?.length || d.legenda);
+
+async function telaDanos(vid) {
+  const v = await BD.ler("vistorias", vid);
+  const o = v && Estado.oaes.get(v.oae);
+  if (!o) { location.hash = "#/"; return; }
+  cabecalho("Fotos de dano", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
+  const danos = v.fotos.filter(f => f.dano).sort((a, b) => a.n - b.n);
+  const minis = await Promise.all(danos.map(d => BD.ler("fotos", `${vid}#D${d.dano}`)));
+  $("#tela").innerHTML = `
+    <div class="botoes"><a class="botao" href="#/dano/${enc(vid)}/novo">+ Foto de dano</a></div>
+    <p class="suave">Dano visto durante o roteiro: use o botão "+ Dano aqui" na própria foto do roteiro — a foto de dano
+      fica logo depois dela no relatório.</p>
+    <h2>${danos.length} foto(s) de dano</h2>
+    ${danos.map((d, j) => `
+      <a class="lista-item linha" href="#/dano/${enc(vid)}/${d.dano}" style="align-items:center">
+        <img src="${minis[j]?.miniatura || ""}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;flex:none">
+        <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">F${pad(d.n)} · ${esc(d.legenda || "(sem legenda)")}</span>
+          <span class="detalhe" style="display:block">${d.perto_de != null ? `junto à foto R${pad(d.perto_de)} do roteiro` : "fora do roteiro"}</span></span>
+        <span class="selo ${danoCompleto(d) ? "ok" : "alerta"}">${danoCompleto(d) ? "✓" : "falta dado"}</span></a>`).join("")
+      || `<div class="vazio">Nenhuma foto de dano ainda.</div>`}`;
+}
+
+/* uma foto de dano: elemento, foto, posição e direção no croqui (dois toques), danos e legenda.
+ * Antes da foto, o que for preenchido fica só na tela; depois da foto, cada mudança é gravada na hora. */
+async function telaDano(vid, kArg, pertoArg) {
+  const v = await BD.ler("vistorias", vid);
+  const o = v && Estado.oaes.get(v.oae);
+  if (!o) { location.hash = "#/"; return; }
+  const k = kArg === "novo" ? null : Number(kArg);
+  const reg = k ? v.fotos.find(f => f.dano === k) : null;
+  if (k && !reg) { location.hash = `#/danos/${enc(vid)}`; return; }
+  const perto = reg ? reg.perto_de : pertoArg;
+  const r = perto != null ? o.roteiro.find(x => x.n === perto) : null;
+  const voltar = r ? `#/foto/${enc(vid)}/${r.n}` : `#/danos/${enc(vid)}`;
+  cabecalho(reg ? `Foto de dano F${pad(reg.n)}` : "Nova foto de dano",
+    `${r ? `junto à R${pad(r.n)} · ` : ""}${o.item}. ${o.nome}`, voltar);
+  GPS.iniciar();
+  Bussola.iniciar();
+  const foto = k ? await BD.ler("fotos", `${vid}#D${k}`) : null;
+  const sug = sugestoes(o, r);
+  const f = {
+    el: reg ? o.elementos.find(e => e.elemento === reg.elemento && e.tramo === reg.tramo) || null : sug.length === 1 ? sug[0] : null,
+    danos: reg?.danos ? [...reg.danos] : [], onde: reg?.onde || "", obs: reg?.obs || "",
+    legenda: reg?.legenda || "", editada: !!reg?.legenda_editada,
+    // posição: a gravada; se não, a da foto do roteiro em que o dano foi visto (já aceita, pode remarcar)
+    x: reg ? reg.x : r ? r.x : null, y: reg ? reg.y : r ? r.y : 0.5, direcao: reg ? reg.direcao : r ? r.direcao : null,
+    semDirecao: !!reg?.sem_direcao,
+  };
+  let modo = (reg ? reg.posicao_marcada : !!r) ? "pronto" : "posicao";
+  const legendaAtual = () => f.editada ? f.legenda : montarLegenda(o, f.el, f.danos, f.onde);
+  const campos = () => ({
+    perto_de: perto ?? null, elemento: f.el ? f.el.elemento : null, tramo: f.el ? f.el.tramo : null,
+    danos: f.danos, onde: f.onde.trim(), legenda: legendaAtual(), legenda_editada: f.editada, obs: f.obs.trim(),
+    x: f.x, y: f.y, direcao: f.semDirecao ? null : f.direcao, sem_direcao: f.semDirecao, posicao_marcada: modo === "pronto",
+  });
+  let fila = Promise.resolve();
+  const gravar = () => {
+    if (!k) return;
+    fila = fila.then(async () => {
+      const vv = await BD.ler("vistorias", vid);
+      const rr = vv.fotos.find(x => x.dano === k);
+      if (!rr) return;
+      Object.assign(rr, campos());
+      renumerar(vv, o);
+      vv.atualizado_em = new Date().toISOString();
+      await BD.gravar("vistorias", vv);
+    }).catch(e => { console.error(e); avisar("Não foi possível gravar: " + e.message, 5000); });
+  };
+
+  const multiTramo = o.tramos.length > 1;
+  const nomeEl = e => `${e.elemento} – ${e.detalhe || ""}${multiTramo ? ` (tramo ${e.tramo})` : ""}`;
+  const porRegiao = [...REGIOES, null].map(rg => [rg, o.elementos.filter(e => rg ? e.regiao === rg : !REGIOES.includes(e.regiao))])
+    .filter(([, es]) => es.length);
+  const url = foto ? URL.createObjectURL(foto.blob) : null;
+  $("#tela").innerHTML = `
+    ${r ? `<div class="cartao"><p class="suave">Dano visto na foto do roteiro:</p><p><b>R${pad(r.n)}</b> · ${esc(r.legenda)}</p></div>` : ""}
+    <h2>1. Elemento</h2>
+    ${sug.length ? `<div class="fichas" id="sug">${sug.map(e => `
+      <label><input type="radio" name="sug" value="${esc(chaveEl(e))}" ${f.el && chaveEl(f.el) === chaveEl(e) ? "checked" : ""}><span>${esc(e.elemento)}${multiTramo ? ` · T${e.tramo}` : ""}</span></label>`).join("")}</div>
+      <p class="suave">Ou escolha na lista completa:</p>` : ""}
+    <select id="el-todos">
+      <option value="">${sug.length ? "Outro elemento…" : "Escolha o elemento…"}</option>
+      ${porRegiao.map(([rg, es]) => `<optgroup label="${esc(rg || "Outros")}">${es.map(e =>
+        `<option value="${esc(chaveEl(e))}" ${f.el && chaveEl(f.el) === chaveEl(e) && !sug.some(s => chaveEl(s) === chaveEl(e)) ? "selected" : ""}>${esc(nomeEl(e))}</option>`).join("")}</optgroup>`).join("")}
+    </select>
+    <h2>2. Foto</h2>
+    <div id="gps"></div>
+    ${foto ? `<div class="cartao"><img src="${url}" alt="Foto do dano" style="width:100%;border-radius:8px">
+      <p class="suave">${esc(reg.data_hora.replace("T", " ").slice(0, 16))} · ${reg.carimbo
+        ? `${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m`
+        : `<span style="color:var(--alerta)">sem GPS</span>`}${reg.azimute != null ? ` · bússola ${rumo(reg.azimute)}` : ""}</p></div>` : ""}
+    <div class="botoes"><label class="botao ${foto ? "secundario" : ""}">${foto ? "Refazer foto" : "Tirar foto do dano"}
+      <input id="camera" type="file" accept="image/*" capture="environment" hidden></label></div>
+    <h2>3. Posição e direção no croqui</h2>
+    <div class="cartao"><p id="instr"></p><div id="croqui"></div>
+      <div class="opcoes" style="margin-top:10px">
+        <button id="remarcar" class="botao secundario">Marcar de novo</button>
+        <button id="semdir" class="botao secundario"></button>
+      </div></div>
+    <h2>4. Dano</h2>
+    <div class="fichas" id="danos">${DANOS.map(d => `
+      <label><input type="checkbox" value="${esc(d)}" ${f.danos.includes(d) ? "checked" : ""}><span>${esc(d)}</span></label>`).join("")}</div>
+    <label class="campo"><span>Onde no elemento / extensão (opcional)</span>
+      <input id="onde" type="text" value="${esc(f.onde)}" placeholder="Ex.: face inferior, 1,20 m"></label>
+    <label class="campo"><span>Legenda</span>
+      <textarea id="legenda" rows="3"></textarea></label>
+    <div class="botoes" style="margin-top:0"><button id="leg-auto" class="botao secundario">Voltar à legenda automática</button></div>
+    <label class="campo"><span>Observação (opcional)</span>
+      <textarea id="obs" rows="2" placeholder="Ex.: dano visto só da margem LE">${esc(f.obs)}</textarea></label>
+    <div class="botoes">
+      <button id="concluir" class="botao">Concluir</button>
+      ${reg ? `<button id="excluir" class="botao perigo">Excluir foto de dano</button>` : ""}
+    </div>`;
+
+  const desenharLegenda = () => {
+    $("#legenda").value = legendaAtual();
+    $("#leg-auto").hidden = !f.editada;
+  };
+  const escolher = chave => {
+    f.el = o.elementos.find(e => chaveEl(e) === chave) || null;
+    if (f.el && f.x == null) { f.x = centroTramo(o, f.el.tramo); f.y = 0.5; }   // sugestão: meio do tramo
+    document.querySelectorAll("#sug input").forEach(i => { i.checked = f.el && i.value === chave; });
+    $("#el-todos").value = f.el && !sug.some(e => chaveEl(e) === chave) ? chave : "";
+    desenharLegenda(); desenharCroqui(); gravar();
+  };
+  document.querySelectorAll("#sug input").forEach(i => { i.onchange = () => escolher(i.value); });
+  $("#el-todos").onchange = ev => { if (ev.target.value) escolher(ev.target.value); };
+
+  // croqui: 1º toque = onde estava; 2º toque = para onde a câmera apontou
+  const desenharCroqui = () => {
+    const outros = v.fotos.filter(x => x.dano && x.dano !== k && x.x != null);
+    const g = geoCroqui(o, [...o.roteiro, ...outros, ...(f.x != null ? [f] : [])], { H: 205, yt: 52, yb: 152 });
+    const st = v.roteiro_status || {};
+    const pts = o.roteiro.map(rr => `<circle cx="${g.px(rr.x)}" cy="${g.py(rr.y)}" r="3" fill="${st[rr.n] ? "#1d7a3e" : "#c3cad4"}"/>`).join("")
+      + outros.map(d => `<circle cx="${g.px(d.x)}" cy="${g.py(d.y)}" r="3.5" fill="#e07b1a"/>`).join("");
+    let marca = "";
+    if (f.x != null) {
+      marca = modo === "posicao"
+        ? `<circle cx="${g.px(f.x)}" cy="${g.py(f.y)}" r="7" fill="none" stroke="#b42318" stroke-width="2" stroke-dasharray="3 2"/>`
+        : marcaFoto(g, { x: f.x, y: f.y, direcao: modo === "pronto" && !f.semDirecao ? f.direcao : null }, "#b42318");
+    }
+    $("#croqui").innerHTML = `<svg id="croqui-toque" viewBox="0 0 ${g.W} ${g.H}" width="100%" role="img" aria-label="Toque para marcar a foto no croqui"
+      style="background:#fff;border:2px solid ${modo === "pronto" ? "var(--borda)" : "var(--erro)"};border-radius:10px;touch-action:manipulation">
+      ${fundoCroqui(g)}${pts}${marca}</svg>`;
+    $("#instr").innerHTML = modo === "posicao"
+      ? `<b>1º toque:</b> onde você estava ao tirar a foto.${f.x != null ? " O círculo tracejado é a sugestão pelo elemento." : ""}`
+      : modo === "direcao" ? `<b>2º toque:</b> para onde a câmera apontou.`
+      : `<b>Marcado:</b> ${textoPosicao(f, g.L)}${f.semDirecao ? " · direção não identificável" : f.direcao != null ? ` · direção ${f.direcao}°` : ""}.`;
+    $("#semdir").textContent = f.semDirecao ? "Marcar a direção" : "Direção não identificável";
+    const svg = $("#croqui-toque");
+    svg.onclick = ev => {
+      if (modo === "pronto") return avisar('Para mudar, toque em "Marcar de novo".', 2500);
+      const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+      const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+      if (modo === "posicao") {
+        f.x = Math.round(g.ix(p.x) * 10) / 10;
+        f.y = Math.round(Math.min(1.5, Math.max(-0.5, g.iy(p.y))) * 100) / 100;
+        f.direcao = null;
+        modo = f.semDirecao ? "pronto" : "direcao";
+      } else {
+        const dx = p.x - g.px(f.x), dy = p.y - g.py(f.y);
+        if (Math.hypot(dx, dy) < 10) return avisar("Toque um pouco mais longe do ponto, na direção da foto.", 2500);
+        f.direcao = (Math.round(((Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360) / 5) * 5) % 360;
+        modo = "pronto";
+      }
+      desenharCroqui(); gravar();
+    };
+  };
+  $("#remarcar").onclick = () => { modo = "posicao"; desenharCroqui(); gravar(); };
+  $("#semdir").onclick = () => {
+    f.semDirecao = !f.semDirecao;
+    modo = f.semDirecao ? (f.x != null ? "pronto" : "posicao") : (f.x != null ? "direcao" : "posicao");
+    desenharCroqui(); gravar();
+  };
+
+  document.querySelectorAll("#danos input").forEach(i => {
+    i.onchange = () => {
+      f.danos = DANOS.filter(d => document.querySelector(`#danos input[value="${CSS.escape(d)}"]`).checked);
+      desenharLegenda(); gravar();
+    };
+  });
+  $("#onde").oninput = ev => { f.onde = ev.target.value; desenharLegenda(); };
+  $("#onde").onchange = gravar;
+  $("#legenda").oninput = ev => { f.legenda = ev.target.value; f.editada = true; $("#leg-auto").hidden = false; };
+  $("#legenda").onchange = gravar;
+  $("#leg-auto").onclick = () => { f.editada = false; desenharLegenda(); gravar(); };
+  $("#obs").onchange = ev => { f.obs = ev.target.value; gravar(); };
+
+  const desenharGPS = () => { $("#gps").innerHTML = GPS.html() + (Bussola.azimute != null ? `<div class="gps"><span class="ponto" style="background:${Bussola.confiavel ? "var(--ok)" : "var(--alerta)"}"></span>Bússola: câmera apontando para ${rumo(Bussola.azimute)}</div>` : ""); };
+  desligarGPS = GPS.ouvir(desenharGPS);
+  desenharGPS();
+  const intervalo = setInterval(() => { if (!document.body.contains($("#gps"))) return clearInterval(intervalo); desenharGPS(); }, 1500);
+
+  $("#camera").onchange = async ev => {
+    const arq = ev.target.files[0];
+    if (!arq) return;
+    avisar("Salvando a foto…", 1500);
+    const azimute = Bussola.azimute, bussolaOk = Bussola.confiavel;
+    const pos = await posicaoAgora();
+    await fila;
+    const vv = await BD.ler("vistorias", vid);
+    const agora = new Date(); agora.setMinutes(agora.getMinutes() - agora.getTimezoneOffset());
+    let kk = k;
+    if (!kk) { kk = (vv.dano_seq || 0) + 1; vv.dano_seq = kk; }
+    await BD.gravar("fotos", { id: `${vid}#D${kk}`, vistoria: vid, dano: kk, blob: arq, tipo: arq.type, miniatura: await miniatura(arq), criado_em: new Date().toISOString() });
+    const base = {
+      roteiro: null, dano: kk, arquivo: `D${pad(kk)}_${vv.oae}_${vv.data}.jpg`,
+      lat: pos ? pos.lat : null, lon: pos ? pos.lon : null, precisao_gps: pos ? pos.prec : null,
+      carimbo: pos ? { lat: dms(pos.lat, "lat"), lon: dms(pos.lon, "lon") } : null,
+      azimute: azimute != null ? Math.round(azimute) : null, bussola_confiavel: bussolaOk,
+      data_hora: agora.toISOString().slice(0, 19),
+    };
+    const existente = vv.fotos.find(x => x.dano === kk);
+    if (existente) Object.assign(existente, base);
+    else vv.fotos.push({ n: 0, ...base, ...campos() });
+    renumerar(vv, o);
+    vv.atualizado_em = new Date().toISOString();
+    await BD.gravar("vistorias", vv);
+    avisar(pos ? "Foto do dano salva." : "Foto salva, mas sem GPS. Confira a localização do celular.", pos ? 1500 : 5000);
+    if (k) rotear(); else location.hash = `#/dano/${enc(vid)}/${kk}`;
+  };
+
+  $("#concluir").onclick = async () => {
+    if (!k) return avisar("Tire a foto do dano antes de concluir.");
+    if (!f.el) return avisar("Escolha o elemento do dano.");
+    if (modo !== "pronto") return avisar('Marque no croqui onde você estava e para onde a câmera apontou (ou "Direção não identificável").', 5000);
+    if (!f.danos.length && !(f.editada && f.legenda.trim())) return avisar("Marque o tipo de dano ou escreva a legenda.");
+    await fila;
+    location.hash = voltar;
+  };
+  if ($("#excluir")) $("#excluir").onclick = async () => {
+    if (!confirm("Excluir esta foto de dano? Isso não pode ser desfeito.")) return;
+    await fila;
+    await BD.apagar("fotos", `${vid}#D${k}`);
+    const vv = await BD.ler("vistorias", vid);
+    vv.fotos = vv.fotos.filter(x => x.dano !== k);
+    renumerar(vv, o);
+    vv.atualizado_em = new Date().toISOString();
+    await BD.gravar("vistorias", vv);
+    avisar("Foto de dano excluída.");
+    location.hash = voltar;
+  };
+
+  desenharLegenda();
+  desenharCroqui();
 }
 
 /* ---------- instalação e modo offline ---------- */

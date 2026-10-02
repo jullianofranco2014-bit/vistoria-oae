@@ -108,3 +108,12 @@ input[type=text], input[type=date], input[type=search], textarea, select {
   box-shadow: 0 6px 20px rgba(0,0,0,.25); max-width: 688px; margin: 0 auto;
 }
 .vazio { text-align: center; color: var(--suave); padding: 24px 8px; }
+[hidden] { display: none !important; }
+/* fotos de dano: escolhas em fichas (elemento sugerido e tipos de dano, que admitem mais de um) */
+.fichas { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.fichas label {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 8px 14px;
+  border: 2px solid var(--borda); border-radius: 999px; background: #fff; font-weight: 600; font-size: .92rem; cursor: pointer;
+}
+.fichas input { position: absolute; opacity: 0; pointer-events: none; }
+.fichas label:has(input:checked) { border-color: var(--erro); background: #fdecea; color: var(--erro); }
