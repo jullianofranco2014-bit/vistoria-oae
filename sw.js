@@ -1,6 +1,6 @@
 /* Service worker: guarda os arquivos do app para funcionar sem internet.
  * Ao publicar uma versão nova do app, trocar o nome do CACHE (e o ?v= no index.html). */
-const CACHE = "vistoria-oae-v0.5.1";
+const CACHE = "vistoria-oae-v0.6.0";
 const ARQUIVOS = ["./", "index.html", "estilo.css", "app.js", "manifest.webmanifest", "icone.svg", "icone-192.png", "icone-512.png"];
 
 self.addEventListener("install", e => {

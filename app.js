@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.5.1";
+const VERSAO_APP = "0.6.0";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -138,6 +138,7 @@ async function rotear() {
       false, partes[4] != null ? Number(partes[4]) : null);
     if (rota === "avaliacao" && arg) return telaAvaliacao(decodeURIComponent(arg));
     if (rota === "anotacoes" && arg) return telaAnotacoes(decodeURIComponent(arg));
+    if (rota === "exportar" && arg) return telaExportar(decodeURIComponent(arg));
     if (rota === "elemento" && arg) return telaElemento(decodeURIComponent(arg), Number(partes[2]));
     // #/extra/<vistoria>/novo[/<foto do roteiro>]: foto extra (vista complementar, sem dano)
     if (rota === "extra" && arg) return telaDano(decodeURIComponent(arg), "novo", partes[3] ? Number(partes[3]) : null, true);
@@ -317,7 +318,8 @@ async function telaVistoria(id) {
       `#/avaliacao/${enc(v.id)}`, nAvaliados === o.elementos.length ? "concluído" : "abrir ›", nAvaliados === o.elementos.length],
     ["Anotações de campo", "Aspectos especiais, deficiências e observações (os textos da ficha são redigidos depois)", null,
       `#/anotacoes/${enc(v.id)}`, temAnotacoes ? "anotado" : "abrir ›", temAnotacoes],
-    ["Exportar", "Pacote para o computador (JSON + fotos)", "parte 6"],
+    ["Exportar", "Arquivo .zip com a vistoria e as fotos, para o computador", null, `#/exportar/${enc(v.id)}`,
+      v.exportada_em ? `exportada ${new Date(v.exportada_em).toLocaleDateString("pt-BR")}` : "abrir ›", !!v.exportada_em],
   ];
   const desenhar = () => {
     const d = GPS.pos && o.lat ? distanciaM(GPS.pos.lat, GPS.pos.lon, o.lat, o.lon) : null;
@@ -334,12 +336,12 @@ async function telaVistoria(id) {
           <div class="texto"><strong>${t}</strong><div class="suave">${s}</div></div>
           <span class="selo alerta">${parte}</span></div>`).join("")}
       <div class="botoes">
-        <button id="baixar" class="botao secundario">Baixar JSON da vistoria (teste)</button>
         <button id="excluir" class="botao perigo">Excluir vistoria</button>
       </div>`;
-    $("#baixar").onclick = () => baixarJSON(v);
     $("#excluir").onclick = async () => {
-      if (!confirm("Excluir esta vistoria do celular, com todas as fotos? Isso não pode ser desfeito.")) return;
+      const aviso = v.exportada_em ? `Excluir esta vistoria do celular, com todas as fotos? (exportada em ${horaLocal(v.exportada_em)}; o que foi feito depois disso se perde)`
+        : "ATENÇÃO: esta vistoria AINDA NÃO FOI EXPORTADA. Excluir do celular, com todas as fotos? Isso não pode ser desfeito.";
+      if (!confirm(aviso)) return;
       for (const f of await BD.todos("fotos")) if (f.vistoria === v.id) await BD.apagar("fotos", f.id);
       await BD.apagar("vistorias", v.id);
       avisar("Vistoria excluída.");
@@ -348,16 +350,6 @@ async function telaVistoria(id) {
   };
   desligarGPS = GPS.ouvir(desenhar);
   desenhar();
-}
-
-function baixarJSON(v) {
-  const { id, criado_em, atualizado_em, ...saida } = v;
-  const blob = new Blob([JSON.stringify(saida, null, 1)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${v.id}.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
 /* ---------- bússola: azimute para onde aponta a câmera traseira ---------- */
@@ -1320,6 +1312,174 @@ async function telaAnotacoes(vid) {
     $(id).oninput = ev => { a[campo] = ev.target.value; };
     $(id).onchange = salvar;
   }
+}
+
+/* ---------- exportar (parte 6.1) ----------
+ * Um único .zip com a vistoria (JSON no formato do gerar.py) e as fotos (originais ou reduzidas a ~2000 px),
+ * enviado pelo "Compartilhar" do Android (OneDrive, WhatsApp, e-mail...) ou salvo no celular. Montado aqui mesmo,
+ * sem internet: zip sem compressão (as fotos já são JPEG), com CRC32. */
+const CRC_TAB = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TAB[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+/* arquivos: [{nome, blob}] -> Blob .zip (método "stored"; nomes em UTF-8) */
+async function montarZip(arquivos, progresso) {
+  const agora = new Date();
+  const hora = (agora.getHours() << 11) | (agora.getMinutes() << 5) | (agora.getSeconds() >> 1);
+  const dia = ((agora.getFullYear() - 1980) << 9) | ((agora.getMonth() + 1) << 5) | agora.getDate();
+  const te = new TextEncoder(), partes = [], central = [];
+  let pos = 0, tamCentral = 0;
+  for (const [i, a] of arquivos.entries()) {
+    const dados = new Uint8Array(await a.blob.arrayBuffer());
+    const crc = crc32(dados), nome = te.encode(a.nome), n = dados.length;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, hora, true); lh.setUint16(12, dia, true); lh.setUint32(14, crc, true);
+    lh.setUint32(18, n, true); lh.setUint32(22, n, true); lh.setUint16(26, nome.length, true); lh.setUint16(28, 0, true);
+    partes.push(lh.buffer, nome, a.blob);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+    ch.setUint16(10, 0, true); ch.setUint16(12, hora, true); ch.setUint16(14, dia, true); ch.setUint32(16, crc, true);
+    ch.setUint32(20, n, true); ch.setUint32(24, n, true); ch.setUint16(28, nome.length, true);
+    ch.setUint16(30, 0, true); ch.setUint16(32, 0, true); ch.setUint16(34, 0, true); ch.setUint16(36, 0, true);
+    ch.setUint32(38, 0, true); ch.setUint32(42, pos, true);
+    central.push(ch.buffer, nome);
+    pos += 30 + nome.length + n;
+    tamCentral += 46 + nome.length;
+    progresso?.(i + 1, arquivos.length);
+  }
+  const fim = new DataView(new ArrayBuffer(22));
+  fim.setUint32(0, 0x06054b50, true); fim.setUint16(4, 0, true); fim.setUint16(6, 0, true);
+  fim.setUint16(8, arquivos.length, true); fim.setUint16(10, arquivos.length, true);
+  fim.setUint32(12, tamCentral, true); fim.setUint32(16, pos, true); fim.setUint16(20, 0, true);
+  return new Blob([...partes, ...central, fim.buffer], { type: "application/zip" });
+}
+async function reduzirFoto(blob, lado = 2000) {
+  const img = await createImageBitmap(blob);
+  const k = Math.min(1, lado / Math.max(img.width, img.height));
+  if (k === 1) return blob;
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return new Promise(ok => c.toBlob(b => ok(b || blob), "image/jpeg", 0.88));
+}
+const mb = bytes => `${num(bytes / 1048576, bytes < 10485760 ? 1 : 0)} MB`;
+const horaLocal = iso => new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+
+/* conferência antes de exportar: o que falta (pode exportar assim mesmo, ex.: cópia de segurança) */
+function conferencia(v, o) {
+  const st = v.roteiro_status || {};
+  const itens = [];
+  const add = (ok, texto) => itens.push({ ok, texto });
+  const pend = o.roteiro.filter(r => !st[r.n]);
+  add(!pend.length, pend.length ? `Roteiro: ${pend.length} foto(s) pendente(s) (${pend.slice(0, 6).map(r => `R${pad(r.n)}`).join(", ")}${pend.length > 6 ? "…" : ""})` : "Roteiro completo");
+  const inc = v.fotos.filter(f => f.dano && !danoCompleto(f));
+  add(!inc.length, inc.length ? `Fotos de dano/extras com dado faltando: ${inc.map(f => `F${pad(f.n)}`).join(", ")}` : "Fotos de dano e extras completas");
+  const naoAv = o.elementos.filter((e, i) => avaliacaoDe(v, o, i)?.nota == null);
+  add(!naoAv.length, naoAv.length ? `Avaliação: ${naoAv.length} de ${o.elementos.length} elemento(s) sem nota` : "Todos os elementos avaliados");
+  const semEc = v.avaliacao.reduce((n, a) => n + (a.danos || []).filter(d => d.ec == null || !d.extensao).length, 0);
+  add(!semEc, semEc ? `${semEc} dano(s) sem EC ou sem extensão` : "Danos com EC e extensão");
+  const semGps = v.fotos.filter(f => f.lat == null);
+  add(!semGps.length, semGps.length ? `${semGps.length} foto(s) sem GPS: ${semGps.slice(0, 8).map(f => `F${pad(f.n)}`).join(", ")}` : "Todas as fotos com GPS");
+  const an = v.anotacoes || {};
+  add(true, an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes
+    ? "Anotações de campo preenchidas" : "Sem anotações de campo (opcional)");
+  return itens;
+}
+
+async function telaExportar(vid) {
+  const v = await BD.ler("vistorias", vid);
+  const o = v && Estado.oaes.get(v.oae);
+  if (!o) { location.hash = "#/"; return; }
+  cabecalho("Exportar vistoria", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
+  const conf = conferencia(v, o);
+  const lojas = (await BD.todos("fotos")).filter(f => f.vistoria === vid);
+  const blobDe = f => lojas.find(x => x.id === (f.roteiro != null ? `${vid}#R${f.roteiro}` : `${vid}#D${f.dano}`))?.blob;
+  const total = v.fotos.reduce((s, f) => s + (blobDe(f)?.size || 0), 0);
+  const nomeZip = `vistoria_${v.oae}_${v.data}.zip`;
+  $("#tela").innerHTML = `
+    <div class="cartao"><h3>Conferência</h3>
+      ${conf.map(c => `<p>${c.ok ? "✅" : "⚠️"} ${esc(c.texto)}</p>`).join("")}
+      <p class="suave">Pode exportar mesmo com pendências (por exemplo, como cópia de segurança no meio da vistoria).</p></div>
+    <div class="cartao"><h3>Arquivo</h3>
+      <p><b>${esc(nomeZip)}</b></p>
+      <p class="suave">${v.fotos.length} foto(s) · ${mb(total)} nas fotos originais${v.exportada_em ? ` · última exportação: ${esc(horaLocal(v.exportada_em))}` : ""}</p>
+      <label class="campo" style="display:flex;gap:10px;align-items:center;margin-top:10px">
+        <input id="reduzir" type="checkbox" style="width:24px;height:24px">
+        <span style="margin:0;font-weight:600">Reduzir as fotos (~2000 px) — arquivo bem menor, para enviar pelo 4G</span></label>
+    </div>
+    <div id="progresso" class="cartao" hidden><p id="prog-txt"></p>
+      <div style="height:8px;background:#e5e9ef;border-radius:4px"><div id="prog-barra" style="height:8px;border-radius:4px;background:var(--azul);width:0"></div></div></div>
+    <div class="botoes">
+      <button id="compartilhar" class="botao">Compartilhar (OneDrive, WhatsApp…)</button>
+      <button id="salvar" class="botao secundario">Salvar no celular (Downloads)</button>
+    </div>
+    <p class="suave">No OneDrive, salve na pasta <b>Claude outputs › Vistoria OAE › vistorias recebidas</b>. A vistoria
+      continua neste celular até você excluí-la.</p>`;
+
+  const preparar = async () => {
+    const reduzir = $("#reduzir").checked;
+    const botoes = [$("#compartilhar"), $("#salvar")];
+    botoes.forEach(b => { b.disabled = true; });
+    $("#progresso").hidden = false;
+    const passo = (txt, frac) => { $("#prog-txt").textContent = txt; $("#prog-barra").style.width = `${Math.round(frac * 100)}%`; };
+    try {
+      const arquivos = [];
+      for (const [i, f] of v.fotos.entries()) {
+        let b = blobDe(f);
+        if (!b) continue;
+        if (reduzir) { passo(`Reduzindo foto ${i + 1} de ${v.fotos.length}…`, i / v.fotos.length / 2); b = await reduzirFoto(b); }
+        arquivos.push({ nome: `fotos/${f.arquivo}`, blob: b });
+      }
+      const { id, criado_em, atualizado_em, ...saida } = v;
+      const exportado_em = new Date().toISOString();
+      const json = { ...saida, app_versao: VERSAO_APP, exportado_em, fotos_reduzidas: reduzir, pasta_fotos: "fotos" };
+      arquivos.unshift({ nome: `vistoria_${v.oae}_${v.data}.json`, blob: new Blob([JSON.stringify(json, null, 1)], { type: "application/json" }) });
+      const zip = await montarZip(arquivos, (k, n) => passo(`Montando o arquivo: ${k} de ${n}…`, (reduzir ? 0.5 : 0) + k / n / (reduzir ? 2 : 1)));
+      passo(`Pronto: ${mb(zip.size)}`, 1);
+      return { arquivo: new File([zip], nomeZip, { type: "application/zip" }), exportado_em, reduzir };
+    } finally {
+      botoes.forEach(b => { b.disabled = false; });
+    }
+  };
+  const marcar = async (r, como) => {
+    const vv = await BD.ler("vistorias", vid);
+    vv.exportada_em = r.exportado_em;
+    vv.exportacao = { arquivo: nomeZip, como, fotos_reduzidas: r.reduzir, tamanho: r.arquivo.size };
+    await BD.gravar("vistorias", vv);
+  };
+  $("#compartilhar").onclick = async () => {
+    try {
+      const r = await preparar();
+      if (!navigator.canShare || !navigator.canShare({ files: [r.arquivo] })) {
+        avisar("Este celular não permite compartilhar o arquivo daqui. Use \"Salvar no celular\".", 6000);
+        return;
+      }
+      await navigator.share({ files: [r.arquivo], title: nomeZip });
+      await marcar(r, "compartilhado");
+      avisar("Vistoria exportada.", 2500);
+    } catch (e) {
+      if (e.name !== "AbortError") { console.error(e); avisar("Não foi possível exportar: " + e.message, 6000); }
+    }
+  };
+  $("#salvar").onclick = async () => {
+    try {
+      const r = await preparar();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(r.arquivo);
+      a.download = nomeZip;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      await marcar(r, "salvo no celular");
+      avisar("Arquivo salvo na pasta Downloads.", 3500);
+    } catch (e) { console.error(e); avisar("Não foi possível exportar: " + e.message, 6000); }
+  };
 }
 
 /* ---------- instalação e modo offline ---------- */
