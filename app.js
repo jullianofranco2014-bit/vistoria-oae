@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.4.1";
+const VERSAO_APP = "0.4.2";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -1055,7 +1055,7 @@ async function telaAvaliacao(vid) {
     const a = avs[i], ant = o.anterior?.elementos?.[i], nf = fotosDoElemento(v, o, i).length, nd = a?.danos?.length || 0;
     html += `<a class="lista-item linha" href="#/elemento/${enc(vid)}/${i}" style="align-items:center">
       <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(nomes[i])}</span>
-        <span class="detalhe" style="display:block">${esc(e.regiao || "")} · ${a?.nota != null ? (nd ? `${nd} dano(s)` : "sem dano") : "a avaliar"}${nf ? ` · ${nf} foto(s) de dano` : ""}${ant?.nota ? ` · anterior: nota ${ant.nota}` : ""}</span></span>
+        <span class="detalhe" style="display:block">${esc(e.regiao || "")} · ${a?.nota != null ? (nd ? `${nd} dano(s)` : "sem dano") : "a avaliar"}${nf ? ` · <b style="color:var(--erro)">${nf} foto(s) de dano</b>` : ""}${ant?.nota ? ` · anterior: nota ${ant.nota}` : ""}</span></span>
       <span class="selo ${a?.nota != null ? (a.nota <= 2 ? "alerta" : "ok") : ""}">${a?.nota != null ? `nota ${a.nota}` : "›"}</span></a>`;
   });
   $("#tela").innerHTML = `
@@ -1134,6 +1134,8 @@ async function telaElemento(vid, i) {
     if (av.nota != null && av.nota <= 3 && !av.danos.some(d => d.insuficiencia))
       alertas.push("Nota 3 ou menor indica insuficiência estrutural: descreva-a no dano (pode ser depois, no escritório).");
     if (av.nota === 5 && av.danos.length) alertas.push("Nota 5 é sem danos (Anexo C), mas há danos registrados.");
+    if (av.nota != null && av.nota < 5 && !av.danos.length)
+      alertas.push(`Sem dano registrado e nota ${av.nota}: pela norma (Anexo C), elemento sem dano é nota 5.`);
     if (buzinote) {
       if (av.existentes == null) alertas.push("Informe a quantidade de buzinotes existentes.");
       if (av.danificados != null && av.existentes != null && av.danificados > av.existentes)
@@ -1146,7 +1148,7 @@ async function telaElemento(vid, i) {
         ${ant ? `<p>Nota: <b>${ant.nota != null ? `${ant.nota} – ${NOTAS_NORMA[ant.nota][0]}` : "não informada na ficha"}</b></p>
           ${ant.dano ? `<p>${esc(ant.dano.dano)}</p><p class="suave">${[ant.dano.quant != null ? `quant. ${ant.dano.quant}` : "", ant.dano.localizacao,
             ant.dano.extensao, ant.dano.ec ? `EC ${ant.dano.ec} - ${ECS_NORMA[ant.dano.ec]}` : ""].filter(Boolean).map(esc).join(" · ")}</p>`
-            : `<p class="suave">Sem dano registrado.</p>`}
+            : `<p class="suave">Sem dano registrado.${ant.nota != null && ant.nota < 5 ? ` A nota ${ant.nota} sem dano estava errada: pela norma, sem dano é nota 5.` : ""}</p>`}
           <div class="botoes"><button id="copiar" class="botao secundario">Manter como na anterior</button></div>`
           : `<p class="suave">${e.novo_desde ? "Elemento novo: separado a partir desta vistoria (antes ficava dentro da laje)." : "Este elemento não está na ficha anterior."}</p>`}
       </div>
@@ -1233,12 +1235,14 @@ async function telaElemento(vid, i) {
     document.querySelectorAll("[data-nota]").forEach(b => { b.onclick = () => { av.nota = Number(b.dataset.nota); salvar(); desenhar(); }; });
     if ($("#copiar")) $("#copiar").onclick = () => {
       if ((av.danos.length || av.nota != null) && !confirm("Substituir o que já foi preenchido pelo que estava na vistoria anterior?")) return;
-      av.nota = ant.nota;
+      // sem dano na anterior: nota 5 pela norma (as fichas anteriores davam 4 a elemento sem dano — usuário, 02/10/2026)
+      av.nota = ant.dano ? ant.nota : 5;
       av.danos = ant.dano ? [{ ...ant.dano, fotos: [], origem: "anterior" }] : [];
       av.descartados = [];
       mesclarFotos();
       salvar(); desenhar();
-      avisar("Copiado da vistoria anterior. Confira e ajuste o que mudou.", 3500);
+      avisar(!ant.dano && ant.nota !== 5 ? `Sem dano na anterior: nota 5, pela norma (a anterior tinha ${ant.nota ?? "sem nota"}).`
+        : "Copiado da vistoria anterior. Confira e ajuste o que mudou.", 4000);
     };
     $("#concluir").onclick = async () => {
       if (av.nota == null) return avisar("Escolha a nota do elemento.");
