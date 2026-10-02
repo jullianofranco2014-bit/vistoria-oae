@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.3.0";
+const VERSAO_APP = "0.3.1";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -134,6 +134,8 @@ async function rotear() {
     if (rota === "danos" && arg) return telaDanos(decodeURIComponent(arg));
     // #/dano/<vistoria>/<nº do dano ou "novo">[/<foto do roteiro em que foi visto>]
     if (rota === "dano" && arg) return telaDano(decodeURIComponent(arg), partes[2], partes[3] ? Number(partes[3]) : null);
+    // #/extra/<vistoria>/novo[/<foto do roteiro>]: foto extra (vista complementar, sem dano)
+    if (rota === "extra" && arg) return telaDano(decodeURIComponent(arg), "novo", partes[3] ? Number(partes[3]) : null, true);
     if (rota === "dados") return telaDados(false);
     return telaInicio();
   } catch (e) {
@@ -297,12 +299,12 @@ async function telaVistoria(id) {
   GPS.iniciar();
   const st = v.roteiro_status || {};
   const feitas = o.roteiro.filter(r => st[r.n]).length;
-  const nDanos = v.fotos.filter(f => f.dano).length;
+  const nExtras = v.fotos.filter(f => f.dano && ehExtra(f)).length, nDanos = v.fotos.filter(f => f.dano).length - nExtras;
   // [título, texto, parte futura, link, selo, selo ok?]
   const etapas = [
     ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${enc(v.id)}`,
       feitas === o.roteiro.length ? "concluído" : "abrir ›", feitas === o.roteiro.length],
-    ["Fotos de dano", `${nDanos} foto(s) · vinculadas ao elemento`, null, `#/danos/${enc(v.id)}`, "abrir ›", false],
+    ["Fotos de dano e extras", `${nDanos} de dano · ${nExtras} extra(s)`, null, `#/danos/${enc(v.id)}`, "abrir ›", false],
     ["Avaliação dos elementos", `${o.elementos.length} elementos · nota e danos`, "parte 4"],
     ["Textos e laudo", "Aspectos especiais, deficiências, observações e laudo", "parte 5"],
     ["Exportar", "Pacote para o computador (JSON + fotos)", "parte 6"],
@@ -478,12 +480,12 @@ async function telaRoteiro(vid) {
   for (const r of o.roteiro) {
     if (r.grupo !== grupo) { grupo = r.grupo; html += `<h2>${esc(grupo)}</h2>`; }
     const f = fotos.get(r.n), s = st[r.n];
-    const nd = v.fotos.filter(x => x.dano && x.perto_de === r.n).length;
+    const aqui = v.fotos.filter(x => x.dano && x.perto_de === r.n), nx = aqui.filter(ehExtra).length, nd = aqui.length - nx;
     html += `<a class="lista-item linha" href="#/foto/${encodeURIComponent(vid)}/${r.n}" style="align-items:center">
       ${f ? `<img src="${f.miniatura}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;flex:none">`
           : `<span style="width:64px;height:48px;border-radius:6px;flex:none;display:grid;place-items:center;background:#eef2f7;color:#5a6472;font-weight:700">R${String(r.n).padStart(2, "0")}</span>`}
       <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(r.legenda)}</span>
-        <span class="detalhe" style="display:block">${DIRECAO[r.direcao] || ""}${r.elemento ? ` · ${esc(r.elemento)}` : ""}${nd ? ` · <b style="color:var(--erro)">${nd} dano(s)</b>` : ""}</span></span>
+        <span class="detalhe" style="display:block">${DIRECAO[r.direcao] || ""}${r.elemento ? ` · ${esc(r.elemento)}` : ""}${nd ? ` · <b style="color:var(--erro)">${nd} dano(s)</b>` : ""}${nx ? ` · ${nx} extra(s)` : ""}</span></span>
       <span class="selo ${s === "feita" ? "ok" : s === "pulada" ? "alerta" : ""}">${s === "feita" ? "✓" : s === "pulada" ? "n/a" : "›"}</span></a>`;
   }
   const prox = o.roteiro.find(r => !st[r.n]);
@@ -530,9 +532,12 @@ async function telaFoto(vid, n) {
     <div class="botoes">
       <label class="botao ${foto ? "secundario" : ""}">${foto ? "Refazer foto" : "Tirar foto"}
         <input id="camera" type="file" accept="image/*" capture="environment" hidden></label>
-      <a class="botao secundario" style="border-color:var(--erro);color:var(--erro)" href="#/dano/${enc(vid)}/novo/${n}">+ Dano aqui</a>
+      <div class="opcoes">
+        <a class="botao secundario" style="border-color:var(--erro);color:var(--erro)" href="#/dano/${enc(vid)}/novo/${n}">+ Dano aqui</a>
+        <a class="botao secundario" href="#/extra/${enc(vid)}/novo/${n}">+ Foto extra aqui</a>
+      </div>
     </div>
-    ${danosAqui.length ? `<h2>Danos vistos nesta foto</h2>${danosAqui.map((d, j) => `
+    ${danosAqui.length ? `<h2>Danos e fotos extras desta foto</h2>${danosAqui.map((d, j) => `
       <a class="lista-item linha" href="#/dano/${enc(vid)}/${d.dano}" style="align-items:center">
         <img src="${minisDano[j]?.miniatura || ""}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;flex:none">
         <span style="flex:1;min-width:0"><span class="nome" style="font-size:.9rem">F${pad(d.n)} · ${esc(d.legenda || "(sem legenda)")}</span></span>
@@ -542,6 +547,7 @@ async function telaFoto(vid, n) {
     <div class="botoes">
       ${st[n] !== "pulada" && !foto ? `<button id="pular" class="botao secundario">Não se aplica nesta OAE</button>` : ""}
       ${foto ? `<a class="botao" href="${prox ? `#/foto/${enc(vid)}/${prox.n}` : `#/roteiro/${enc(vid)}`}">${prox ? `Próxima foto: R${pad(prox.n)} ›` : "Voltar ao roteiro"}</a>` : ""}
+      ${foto ? `<button id="excluir-foto" class="botao perigo">Excluir esta foto</button>` : ""}
       <div class="opcoes">
         <button class="botao secundario" ${ant ? "" : "disabled"} onclick="location.hash='#/foto/${encodeURIComponent(vid)}/${ant ? ant.n : n}'">‹ Anterior</button>
         <button class="botao secundario" ${prox ? "" : "disabled"} onclick="location.hash='#/foto/${encodeURIComponent(vid)}/${prox ? prox.n : n}'">Próxima ›</button>
@@ -556,6 +562,20 @@ async function telaFoto(vid, n) {
     const vv = await BD.ler("vistorias", vid);
     const rr = vv.fotos.find(f => f.roteiro === n);
     if (rr) { rr.obs = ev.target.value.trim(); vv.atualizado_em = new Date().toISOString(); await BD.gravar("vistorias", vv); }
+  };
+  // foto tirada por engano: apaga e a foto do roteiro volta a ficar pendente (os danos ligados a ela ficam)
+  const excluirFoto = $("#excluir-foto");
+  if (excluirFoto) excluirFoto.onclick = async () => {
+    if (!confirm(`Excluir a foto R${pad(n)}? Ela volta a ficar pendente no roteiro.`)) return;
+    await BD.apagar("fotos", idFoto);
+    const vv = await BD.ler("vistorias", vid);
+    vv.fotos = vv.fotos.filter(f => f.roteiro !== n);
+    if (vv.roteiro_status) delete vv.roteiro_status[n];
+    renumerar(vv, o);
+    vv.atualizado_em = new Date().toISOString();
+    await BD.gravar("vistorias", vv);
+    avisar("Foto excluída.");
+    rotear();
   };
   const pular = $("#pular");
   if (pular) pular.onclick = async () => {
@@ -600,11 +620,44 @@ async function telaFoto(vid, n) {
 }
 
 /* ---------- fotos de dano ---------- */
-// termos da planilha de patologias da equipe (Resumo das Patologias e Intervenções), aprovados pelo usuário
-const DANOS = ["Fissuras", "Trincas", "Armadura exposta", "Corrosão", "Desagregação", "Desplacamento",
-  "Lixiviação/eflorescência", "Infiltração/umidade", "Manchas", "Carbonatação", "Ninhos de concretagem", "Erosão",
-  "Obstrução de drenos/buzinotes", "Junta danificada", "Pavimento com desgaste/panelas", "Guarda-corpo danificado",
-  "Defensa danificada/ausente", "Vegetação", "Sujidade", "Pichação", "Colisão"];
+// tipos de dano por tipo de elemento (termos da planilha de patologias da equipe; o usuário pediu a lista filtrada
+// pelo elemento escolhido, com "ver todos" e "outro dano" escrito à mão)
+const CONCRETO = ["Fissuras", "Trincas", "Armadura exposta", "Corrosão de armadura", "Desagregação", "Desplacamento",
+  "Lixiviação/eflorescência", "Infiltração/umidade", "Manchas", "Carbonatação", "Ninhos de concretagem", "Sujidade",
+  "Vegetação", "Pichação"];
+const DANOS_POR_TIPO = {
+  concreto_super: [...CONCRETO, "Colisão"],
+  concreto_meso: [...CONCRETO, "Colisão", "Erosão", "Solapamento/fundação exposta", "Recalque"],
+  aparelho: ["Deformação excessiva", "Rasgos/fissuras no neoprene", "Deslocamento/fora de posição", "Ausência do aparelho",
+    "Corrosão das chapas", "Sujidade/obstrução"],
+  junta: ["Junta danificada", "Vedação ausente ou rompida", "Obstrução/acúmulo de detritos", "Degrau/desnível", "Infiltração/umidade"],
+  pavimento: ["Desgaste", "Panelas/buracos", "Trincas", "Fissuras", "Remendos", "Afundamento", "Obstrução de drenos/buzinotes",
+    "Acúmulo de água"],
+  protecao: ["Guarda-corpo danificado", "Ausência de trechos", "Fissuras", "Armadura exposta", "Desagregação", "Desplacamento",
+    "Corrosão", "Colisão", "Sujidade", "Vegetação", "Pichação"],
+  acesso: ["Erosão", "Recalque/degrau na transição", "Defensa danificada/ausente", "Sinalização deficiente", "Trincas no pavimento",
+    "Obstrução de drenagem", "Vegetação"],
+  madeira: ["Apodrecimento", "Ataque de cupins/insetos", "Fissuras/rachaduras", "Peças soltas ou faltando", "Desgaste", "Umidade", "Fungos"],
+  metalico: ["Corrosão", "Perda de seção", "Pintura deteriorada", "Deformação/amassamento", "Ligações/parafusos soltos", "Colisão", "Sujidade"],
+};
+const NOME_TIPO = { concreto_super: "superestrutura de concreto", concreto_meso: "meso/infraestrutura de concreto",
+  aparelho: "aparelho de apoio", junta: "junta", pavimento: "pavimento", protecao: "guarda-corpo, barreira e calçada",
+  acesso: "acesso/aterro", madeira: "madeira", metalico: "elemento metálico" };
+const DANOS = [...new Set(Object.values(DANOS_POR_TIPO).flat())];   // todos ("ver todos")
+
+/* tipo do elemento, pelo código e pela descrição da ficha */
+function tipoElemento(e) {
+  const c = e.elemento.replace(/\d.*$/, ""), d = (e.detalhe || "").toUpperCase();
+  if (/MADEIRA/.test(d)) return "madeira";
+  if (/^J$/.test(c) || /JUNTA/.test(d)) return "junta";
+  if (/^N$/.test(c) || /NEOPRENE|APARELHO/.test(d)) return "aparelho";
+  if (/^PV$/.test(c) || /PAVIMENTO/.test(d)) return "pavimento";
+  if (/GUARDA|NEW JERSEY|BARREIRA|CAL[ÇC]ADA|PASSARELA|RODEIRO|DEFENSA/.test(d) || /^(G|GC|GR|BR|NJ|CC|PP)$/.test(c)) return "protecao";
+  if (/ATERRO|ACESSO|TRANSI/.test(d) || e.regiao === "Transição") return "acesso";
+  if (/MET[ÁA]LIC|\bA[ÇC]O\b/.test(d)) return "metalico";
+  if (/^(P|VT|B|BL|E|M|VB|R)$/.test(c) || e.regiao === "Mesoestrutura" || e.regiao === "Infraestrutura") return "concreto_meso";
+  return "concreto_super";
+}
 const REGIOES = ["Superestrutura", "Mesoestrutura", "Infraestrutura", "Transição"];
 const chaveEl = e => `${e.elemento}|${e.tramo}`;
 
@@ -635,52 +688,62 @@ function sugestoes(o, r) {
   return lista.filter(e => !vistos.has(chaveEl(e)) && vistos.add(chaveEl(e))).slice(0, 10);
 }
 
-/* legenda automática: "PILAR EM COLUNAS DE CONCRETO ARMADO (P1, TRAMO 1): ARMADURA EXPOSTA E CORROSÃO – FACE DO LD" */
-function montarLegenda(o, el, danos, onde) {
+/* legenda automática: "PILAR EM COLUNAS DE CONCRETO ARMADO (P1, TRAMO 1): ARMADURA EXPOSTA E CORROSÃO – FACE DO LD";
+ * foto extra (vista complementar, sem dano): "VISTA COMPLEMENTAR – PILAR EM COLUNAS DE CONCRETO ARMADO (P1, TRAMO 1)" */
+function montarLegenda(o, el, danos, onde, extra = false) {
+  const tramo = el && o.tramos.length > 1 && el.tramo ? `, TRAMO ${el.tramo}` : "";
+  const nome = el ? `${el.detalhe ? `${el.detalhe.toUpperCase()} ` : ""}(${el.elemento}${tramo})` : "";
+  if (extra) return `VISTA COMPLEMENTAR${nome ? ` – ${nome}` : ""}`;
   if (!el) return "";
   const d = danos.map(x => x.toUpperCase());
   const lista = d.length > 1 ? `${d.slice(0, -1).join(", ")} E ${d[d.length - 1]}` : d.join("");
-  const tramo = o.tramos.length > 1 && el.tramo ? `, TRAMO ${el.tramo}` : "";
-  return `${el.detalhe ? `${el.detalhe.toUpperCase()} ` : ""}(${el.elemento}${tramo})${lista ? `: ${lista}` : ""}`
-    + (onde.trim() ? ` – ${onde.trim().toUpperCase()}` : "");
+  return `${nome}${lista ? `: ${lista}` : ""}` + (onde.trim() ? ` – ${onde.trim().toUpperCase()}` : "");
 }
 
-const danoCompleto = d => d.elemento && d.posicao_marcada && (d.danos?.length || d.legenda);
+const ehExtra = d => d.tipo === "extra";
+const danoCompleto = d => d.posicao_marcada && (ehExtra(d) ? !!d.legenda : d.elemento && (d.danos?.length || d.legenda));
 
 async function telaDanos(vid) {
   const v = await BD.ler("vistorias", vid);
   const o = v && Estado.oaes.get(v.oae);
   if (!o) { location.hash = "#/"; return; }
-  cabecalho("Fotos de dano", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
+  cabecalho("Fotos de dano e extras", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
   const danos = v.fotos.filter(f => f.dano).sort((a, b) => a.n - b.n);
   const minis = await Promise.all(danos.map(d => BD.ler("fotos", `${vid}#D${d.dano}`)));
+  const nExtras = danos.filter(ehExtra).length;
   $("#tela").innerHTML = `
-    <div class="botoes"><a class="botao" href="#/dano/${enc(vid)}/novo">+ Foto de dano</a></div>
-    <p class="suave">Dano visto durante o roteiro: use o botão "+ Dano aqui" na própria foto do roteiro — a foto de dano
-      fica logo depois dela no relatório.</p>
-    <h2>${danos.length} foto(s) de dano</h2>
+    <div class="opcoes" style="margin-top:12px">
+      <a class="botao" href="#/dano/${enc(vid)}/novo">+ Foto de dano</a>
+      <a class="botao secundario" href="#/extra/${enc(vid)}/novo">+ Foto extra</a>
+    </div>
+    <p class="suave">Durante o roteiro, use "+ Dano aqui" ou "+ Foto extra aqui" na própria foto do roteiro — a foto
+      fica logo depois dela no relatório. Aqui ficam também as tiradas fora do roteiro (vão para o fim).</p>
+    <h2>${danos.length - nExtras} foto(s) de dano${nExtras ? ` · ${nExtras} extra(s)` : ""}</h2>
     ${danos.map((d, j) => `
       <a class="lista-item linha" href="#/dano/${enc(vid)}/${d.dano}" style="align-items:center">
         <img src="${minis[j]?.miniatura || ""}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;flex:none">
         <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">F${pad(d.n)} · ${esc(d.legenda || "(sem legenda)")}</span>
-          <span class="detalhe" style="display:block">${d.perto_de != null ? `junto à foto R${pad(d.perto_de)} do roteiro` : "fora do roteiro"}</span></span>
+          <span class="detalhe" style="display:block">${ehExtra(d) ? "foto extra · " : ""}${d.perto_de != null ? `junto à foto R${pad(d.perto_de)} do roteiro` : "fora do roteiro"}</span></span>
         <span class="selo ${danoCompleto(d) ? "ok" : "alerta"}">${danoCompleto(d) ? "✓" : "falta dado"}</span></a>`).join("")
-      || `<div class="vazio">Nenhuma foto de dano ainda.</div>`}`;
+      || `<div class="vazio">Nenhuma foto de dano ou extra ainda.</div>`}`;
 }
 
 /* uma foto de dano: elemento, foto, posição e direção no croqui (dois toques), danos e legenda.
  * Antes da foto, o que for preenchido fica só na tela; depois da foto, cada mudança é gravada na hora. */
-async function telaDano(vid, kArg, pertoArg) {
+async function telaDano(vid, kArg, pertoArg, extraNovo = false) {
   const v = await BD.ler("vistorias", vid);
   const o = v && Estado.oaes.get(v.oae);
   if (!o) { location.hash = "#/"; return; }
   const k = kArg === "novo" ? null : Number(kArg);
   const reg = k ? v.fotos.find(f => f.dano === k) : null;
   if (k && !reg) { location.hash = `#/danos/${enc(vid)}`; return; }
+  // foto extra: vista complementar sem dano (elemento opcional, legenda livre)
+  const extra = reg ? ehExtra(reg) : extraNovo;
+  const oQue = extra ? "foto extra" : "foto de dano";
   const perto = reg ? reg.perto_de : pertoArg;
   const r = perto != null ? o.roteiro.find(x => x.n === perto) : null;
   const voltar = r ? `#/foto/${enc(vid)}/${r.n}` : `#/danos/${enc(vid)}`;
-  cabecalho(reg ? `Foto de dano F${pad(reg.n)}` : "Nova foto de dano",
+  cabecalho(reg ? `${extra ? "Foto extra" : "Foto de dano"} F${pad(reg.n)}` : `Nova ${oQue}`,
     `${r ? `junto à R${pad(r.n)} · ` : ""}${o.item}. ${o.nome}`, voltar);
   GPS.iniciar();
   Bussola.iniciar();
@@ -692,11 +755,12 @@ async function telaDano(vid, kArg, pertoArg) {
     legenda: reg?.legenda || "", editada: !!reg?.legenda_editada,
     // posição: a gravada; se não, a da foto do roteiro em que o dano foi visto (já aceita, pode remarcar)
     x: reg ? reg.x : r ? r.x : null, y: reg ? reg.y : r ? r.y : 0.5, direcao: reg ? reg.direcao : r ? r.direcao : null,
-    semDirecao: !!reg?.sem_direcao,
+    semDirecao: !!reg?.sem_direcao, verTodos: false,
   };
   let modo = (reg ? reg.posicao_marcada : !!r) ? "pronto" : "posicao";
-  const legendaAtual = () => f.editada ? f.legenda : montarLegenda(o, f.el, f.danos, f.onde);
+  const legendaAtual = () => f.editada ? f.legenda : montarLegenda(o, f.el, f.danos, f.onde, extra);
   const campos = () => ({
+    tipo: extra ? "extra" : "dano",
     perto_de: perto ?? null, elemento: f.el ? f.el.elemento : null, tramo: f.el ? f.el.tramo : null,
     danos: f.danos, onde: f.onde.trim(), legenda: legendaAtual(), legenda_editada: f.editada, obs: f.obs.trim(),
     x: f.x, y: f.y, direcao: f.semDirecao ? null : f.direcao, sem_direcao: f.semDirecao, posicao_marcada: modo === "pronto",
@@ -721,8 +785,8 @@ async function telaDano(vid, kArg, pertoArg) {
     .filter(([, es]) => es.length);
   const url = foto ? URL.createObjectURL(foto.blob) : null;
   $("#tela").innerHTML = `
-    ${r ? `<div class="cartao"><p class="suave">Dano visto na foto do roteiro:</p><p><b>R${pad(r.n)}</b> · ${esc(r.legenda)}</p></div>` : ""}
-    <h2>1. Elemento</h2>
+    ${r ? `<div class="cartao"><p class="suave">${extra ? "Foto extra junto à" : "Dano visto na"} foto do roteiro:</p><p><b>R${pad(r.n)}</b> · ${esc(r.legenda)}</p></div>` : ""}
+    <h2>1. Elemento${extra ? " (opcional)" : ""}</h2>
     ${sug.length ? `<div class="fichas" id="sug">${sug.map(e => `
       <label><input type="radio" name="sug" value="${esc(chaveEl(e))}" ${f.el && chaveEl(f.el) === chaveEl(e) ? "checked" : ""}><span>${esc(e.elemento)}${multiTramo ? ` · T${e.tramo}` : ""}</span></label>`).join("")}</div>
       <p class="suave">Ou escolha na lista completa:</p>` : ""}
@@ -737,7 +801,7 @@ async function telaDano(vid, kArg, pertoArg) {
       <p class="suave">${esc(reg.data_hora.replace("T", " ").slice(0, 16))} · ${reg.carimbo
         ? `${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m`
         : `<span style="color:var(--alerta)">sem GPS</span>`}${reg.azimute != null ? ` · bússola ${rumo(reg.azimute)}` : ""}</p></div>` : ""}
-    <div class="botoes"><label class="botao ${foto ? "secundario" : ""}">${foto ? "Refazer foto" : "Tirar foto do dano"}
+    <div class="botoes"><label class="botao ${foto ? "secundario" : ""}">${foto ? "Refazer foto" : extra ? "Tirar foto extra" : "Tirar foto do dano"}
       <input id="camera" type="file" accept="image/*" capture="environment" hidden></label></div>
     <h2>3. Posição e direção no croqui</h2>
     <div class="cartao"><p id="instr"></p><div id="croqui"></div>
@@ -745,19 +809,24 @@ async function telaDano(vid, kArg, pertoArg) {
         <button id="remarcar" class="botao secundario">Marcar de novo</button>
         <button id="semdir" class="botao secundario"></button>
       </div></div>
-    <h2>4. Dano</h2>
-    <div class="fichas" id="danos">${DANOS.map(d => `
-      <label><input type="checkbox" value="${esc(d)}" ${f.danos.includes(d) ? "checked" : ""}><span>${esc(d)}</span></label>`).join("")}</div>
+    ${extra ? "" : `<h2>4. Dano</h2>
+    <p class="suave" id="danos-tipo"></p>
+    <div class="fichas" id="danos"></div>
+    <button id="ver-todos" class="botao secundario" style="min-height:40px;padding:6px 14px;width:auto;font-size:.9rem"></button>
+    <div class="linha" style="margin-top:10px">
+      <input id="outro" type="text" placeholder="Outro dano…">
+      <button id="add-outro" class="botao" style="width:auto;min-height:48px;padding:8px 14px">Adicionar</button>
+    </div>
     <label class="campo"><span>Onde no elemento / extensão (opcional)</span>
-      <input id="onde" type="text" value="${esc(f.onde)}" placeholder="Ex.: face inferior, 1,20 m"></label>
-    <label class="campo"><span>Legenda</span>
+      <input id="onde" type="text" value="${esc(f.onde)}" placeholder="Ex.: face inferior, 1,20 m"></label>`}
+    <label class="campo"><span>${extra ? "4. Legenda" : "Legenda"}</span>
       <textarea id="legenda" rows="3"></textarea></label>
     <div class="botoes" style="margin-top:0"><button id="leg-auto" class="botao secundario">Voltar à legenda automática</button></div>
     <label class="campo"><span>Observação (opcional)</span>
       <textarea id="obs" rows="2" placeholder="Ex.: dano visto só da margem LE">${esc(f.obs)}</textarea></label>
     <div class="botoes">
       <button id="concluir" class="botao">Concluir</button>
-      ${reg ? `<button id="excluir" class="botao perigo">Excluir foto de dano</button>` : ""}
+      ${reg ? `<button id="excluir" class="botao perigo">Excluir ${oQue}</button>` : ""}
     </div>`;
 
   const desenharLegenda = () => {
@@ -769,7 +838,25 @@ async function telaDano(vid, kArg, pertoArg) {
     if (f.el && f.x == null) { f.x = centroTramo(o, f.el.tramo); f.y = 0.5; }   // sugestão: meio do tramo
     document.querySelectorAll("#sug input").forEach(i => { i.checked = f.el && i.value === chave; });
     $("#el-todos").value = f.el && !sug.some(e => chaveEl(e) === chave) ? chave : "";
-    desenharLegenda(); desenharCroqui(); gravar();
+    desenharDanos(); desenharLegenda(); desenharCroqui(); gravar();
+  };
+  // danos: só os do tipo do elemento escolhido (ou todos, a pedido), mais os já marcados e os escritos à mão
+  const desenharDanos = () => {
+    if (extra) return;
+    const tipo = f.el ? tipoElemento(f.el) : null;
+    const lista = [...new Set([...(!tipo || f.verTodos ? DANOS : DANOS_POR_TIPO[tipo]), ...f.danos])];
+    $("#danos").innerHTML = lista.map(d => `
+      <label><input type="checkbox" value="${esc(d)}" ${f.danos.includes(d) ? "checked" : ""}><span>${esc(d)}</span></label>`).join("");
+    $("#danos-tipo").textContent = !tipo ? "Escolha o elemento para ver só os danos do tipo dele."
+      : f.verTodos ? "Mostrando todos os tipos de dano." : `Danos de ${NOME_TIPO[tipo]}:`;
+    $("#ver-todos").hidden = !tipo;
+    $("#ver-todos").textContent = f.verTodos && tipo ? `Mostrar só os de ${NOME_TIPO[tipo]}` : "Ver todos os tipos de dano";
+    document.querySelectorAll("#danos input").forEach(i => {
+      i.onchange = () => {
+        f.danos = i.checked ? [...f.danos, i.value] : f.danos.filter(x => x !== i.value);
+        desenharLegenda(); gravar();
+      };
+    });
   };
   document.querySelectorAll("#sug input").forEach(i => { i.onchange = () => escolher(i.value); });
   $("#el-todos").onchange = ev => { if (ev.target.value) escolher(ev.target.value); };
@@ -821,14 +908,19 @@ async function telaDano(vid, kArg, pertoArg) {
     desenharCroqui(); gravar();
   };
 
-  document.querySelectorAll("#danos input").forEach(i => {
-    i.onchange = () => {
-      f.danos = DANOS.filter(d => document.querySelector(`#danos input[value="${CSS.escape(d)}"]`).checked);
-      desenharLegenda(); gravar();
+  if (!extra) {
+    $("#ver-todos").onclick = () => { f.verTodos = !f.verTodos; desenharDanos(); };
+    $("#add-outro").onclick = () => {
+      const t = $("#outro").value.trim();
+      if (!t) return avisar("Escreva o dano no campo ao lado.");
+      if (!f.danos.some(d => d.toLowerCase() === t.toLowerCase())) f.danos.push(t);
+      $("#outro").value = "";
+      desenharDanos(); desenharLegenda(); gravar();
     };
-  });
-  $("#onde").oninput = ev => { f.onde = ev.target.value; desenharLegenda(); };
-  $("#onde").onchange = gravar;
+    $("#outro").onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); $("#add-outro").click(); } };
+    $("#onde").oninput = ev => { f.onde = ev.target.value; desenharLegenda(); };
+    $("#onde").onchange = gravar;
+  }
   $("#legenda").oninput = ev => { f.legenda = ev.target.value; f.editada = true; $("#leg-auto").hidden = false; };
   $("#legenda").onchange = gravar;
   $("#leg-auto").onclick = () => { f.editada = false; desenharLegenda(); gravar(); };
@@ -852,7 +944,7 @@ async function telaDano(vid, kArg, pertoArg) {
     if (!kk) { kk = (vv.dano_seq || 0) + 1; vv.dano_seq = kk; }
     await BD.gravar("fotos", { id: `${vid}#D${kk}`, vistoria: vid, dano: kk, blob: arq, tipo: arq.type, miniatura: await miniatura(arq), criado_em: new Date().toISOString() });
     const base = {
-      roteiro: null, dano: kk, arquivo: `D${pad(kk)}_${vv.oae}_${vv.data}.jpg`,
+      roteiro: null, dano: kk, arquivo: `${extra ? "X" : "D"}${pad(kk)}_${vv.oae}_${vv.data}.jpg`,
       lat: pos ? pos.lat : null, lon: pos ? pos.lon : null, precisao_gps: pos ? pos.prec : null,
       carimbo: pos ? { lat: dms(pos.lat, "lat"), lon: dms(pos.lon, "lon") } : null,
       azimute: azimute != null ? Math.round(azimute) : null, bussola_confiavel: bussolaOk,
@@ -864,20 +956,21 @@ async function telaDano(vid, kArg, pertoArg) {
     renumerar(vv, o);
     vv.atualizado_em = new Date().toISOString();
     await BD.gravar("vistorias", vv);
-    avisar(pos ? "Foto do dano salva." : "Foto salva, mas sem GPS. Confira a localização do celular.", pos ? 1500 : 5000);
+    avisar(pos ? "Foto salva." : "Foto salva, mas sem GPS. Confira a localização do celular.", pos ? 1500 : 5000);
     if (k) rotear(); else location.hash = `#/dano/${enc(vid)}/${kk}`;
   };
 
   $("#concluir").onclick = async () => {
-    if (!k) return avisar("Tire a foto do dano antes de concluir.");
-    if (!f.el) return avisar("Escolha o elemento do dano.");
+    if (!k) return avisar(`Tire a ${oQue} antes de concluir.`);
+    if (!extra && !f.el) return avisar("Escolha o elemento do dano.");
     if (modo !== "pronto") return avisar('Marque no croqui onde você estava e para onde a câmera apontou (ou "Direção não identificável").', 5000);
-    if (!f.danos.length && !(f.editada && f.legenda.trim())) return avisar("Marque o tipo de dano ou escreva a legenda.");
+    if (extra ? !legendaAtual().trim() : !f.danos.length && !(f.editada && f.legenda.trim()))
+      return avisar(extra ? "Escreva a legenda da foto." : "Marque o tipo de dano ou escreva a legenda.");
     await fila;
     location.hash = voltar;
   };
   if ($("#excluir")) $("#excluir").onclick = async () => {
-    if (!confirm("Excluir esta foto de dano? Isso não pode ser desfeito.")) return;
+    if (!confirm(`Excluir esta ${oQue}? Isso não pode ser desfeito.`)) return;
     await fila;
     await BD.apagar("fotos", `${vid}#D${k}`);
     const vv = await BD.ler("vistorias", vid);
@@ -885,10 +978,11 @@ async function telaDano(vid, kArg, pertoArg) {
     renumerar(vv, o);
     vv.atualizado_em = new Date().toISOString();
     await BD.gravar("vistorias", vv);
-    avisar("Foto de dano excluída.");
+    avisar(extra ? "Foto extra excluída." : "Foto de dano excluída.");
     location.hash = voltar;
   };
 
+  desenharDanos();
   desenharLegenda();
   desenharCroqui();
 }
