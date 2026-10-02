@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.6.0";
+const VERSAO_APP = "0.6.1";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -1417,15 +1417,21 @@ async function telaExportar(vid) {
     <div id="progresso" class="cartao" hidden><p id="prog-txt"></p>
       <div style="height:8px;background:#e5e9ef;border-radius:4px"><div id="prog-barra" style="height:8px;border-radius:4px;background:var(--azul);width:0"></div></div></div>
     <div class="botoes">
-      <button id="compartilhar" class="botao">Compartilhar (OneDrive, WhatsApp…)</button>
-      <button id="salvar" class="botao secundario">Salvar no celular (Downloads)</button>
+      <button id="salvar" class="botao">Salvar o arquivo no celular</button>
     </div>
-    <p class="suave">No OneDrive, salve na pasta <b>Claude outputs › Vistoria OAE › vistorias recebidas</b>. A vistoria
-      continua neste celular até você excluí-la.</p>`;
+    <div id="enviar" class="cartao" ${v.exportada_em ? "" : "hidden"}><h3>Enviar para o computador (OneDrive)</h3>
+      <p>O arquivo fica na pasta <b>Downloads</b> do celular. Mande para a pasta
+        <b>Claude outputs › Vistoria OAE › vistorias recebidas</b> do OneDrive, de um destes jeitos:</p>
+      <p><b>Pelo app OneDrive:</b> abra a pasta "vistorias recebidas" → toque em <b>+</b> → <b>Carregar</b> →
+        Downloads → <b>${esc(nomeZip)}</b>.</p>
+      <p><b>Pelo app de arquivos:</b> Downloads → toque e segure <b>${esc(nomeZip)}</b> → <b>Compartilhar</b> →
+        OneDrive → escolha a pasta "vistorias recebidas".</p>
+      <p class="suave">O Chrome não deixa o app compartilhar arquivo .zip direto (bloqueio de segurança dele), por isso
+        o envio é feito por um desses apps. A vistoria continua neste celular até você excluí-la.</p></div>`;
 
   const preparar = async () => {
     const reduzir = $("#reduzir").checked;
-    const botoes = [$("#compartilhar"), $("#salvar")];
+    const botoes = [$("#salvar")];
     botoes.forEach(b => { b.disabled = true; });
     $("#progresso").hidden = false;
     const passo = (txt, frac) => { $("#prog-txt").textContent = txt; $("#prog-barra").style.width = `${Math.round(frac * 100)}%`; };
@@ -1454,20 +1460,6 @@ async function telaExportar(vid) {
     vv.exportacao = { arquivo: nomeZip, como, fotos_reduzidas: r.reduzir, tamanho: r.arquivo.size };
     await BD.gravar("vistorias", vv);
   };
-  $("#compartilhar").onclick = async () => {
-    try {
-      const r = await preparar();
-      if (!navigator.canShare || !navigator.canShare({ files: [r.arquivo] })) {
-        avisar("Este celular não permite compartilhar o arquivo daqui. Use \"Salvar no celular\".", 6000);
-        return;
-      }
-      await navigator.share({ files: [r.arquivo], title: nomeZip });
-      await marcar(r, "compartilhado");
-      avisar("Vistoria exportada.", 2500);
-    } catch (e) {
-      if (e.name !== "AbortError") { console.error(e); avisar("Não foi possível exportar: " + e.message, 6000); }
-    }
-  };
   $("#salvar").onclick = async () => {
     try {
       const r = await preparar();
@@ -1477,7 +1469,9 @@ async function telaExportar(vid) {
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 60000);
       await marcar(r, "salvo no celular");
-      avisar("Arquivo salvo na pasta Downloads.", 3500);
+      $("#enviar").hidden = false;
+      $("#enviar").scrollIntoView({ behavior: "smooth" });
+      avisar("Arquivo salvo na pasta Downloads. Agora envie para o OneDrive.", 4000);
     } catch (e) { console.error(e); avisar("Não foi possível exportar: " + e.message, 6000); }
   };
 }
