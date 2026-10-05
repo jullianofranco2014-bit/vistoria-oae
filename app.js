@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.0";
+const VERSAO_APP = "0.7.1";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -1079,6 +1079,9 @@ function notaSugerida(a) {
 const avaliacaoDe = (v, o, i) => v.avaliacao.find(a => a.indice === i)
   || v.avaliacao.find(a => a.indice == null && a.elemento === o.elementos[i].elemento && a.tramo === o.elementos[i].tramo);
 const fotosDoElemento = (v, o, i) => v.fotos.filter(f => f.dano && !ehExtra(f) && elDoRegistro(o, f) === o.elementos[i]);
+/* elemento que ficou sem nota na ficha anterior (lacuna: ex. Aroeira E1, Paraíso C1–C4) — não vale para elemento novo
+ * (DR1, A1/A2 desde 02/10/2026), que nem estava na ficha (item 16) */
+const semNotaAnterior = (o, i) => !!o.anterior && !o.elementos[i].novo_desde && o.anterior.elementos?.[i]?.nota == null;
 
 /* quantidade a conferir (item 8; no teste de 02/10/2026 a J1 ficou com 11 e "Toda extensão"): mais de 1 com
  * "toda extensão", ou em junta e guarda-rodas/guarda-corpo (elemento único). Em laje e encontro a quantidade costuma
@@ -1111,6 +1114,7 @@ async function telaAvaliacao(vid) {
   const estr = o.elementos.map((e, i) => estrutural(e) ? avs[i]?.nota : null).filter(n => n != null);
   const final = estr.length ? Math.min(...estr) : null;
   const prox = avs.findIndex(a => a?.nota == null);
+  const lacunas = o.elementos.map((e, i) => i).filter(i => semNotaAnterior(o, i));
   let html = "", grupo = null;
   o.elementos.forEach((e, i) => {
     const g = e.grupo || (o.tramos.length > 1 ? `Tramo ${e.tramo}` : "Elementos");   // DR1 (buzinotes): "Complementar"
@@ -1118,7 +1122,7 @@ async function telaAvaliacao(vid) {
     const a = avs[i], ant = o.anterior?.elementos?.[i], nf = fotosDoElemento(v, o, i).length, nd = a?.danos?.length || 0;
     html += `<a class="lista-item linha" href="#/elemento/${enc(vid)}/${i}" style="align-items:center">
       <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(nomes[i])}</span>
-        <span class="detalhe" style="display:block">${esc(e.regiao || "")} · ${a?.nota != null ? (nd ? `${nd} dano(s)` : "sem dano") : "a avaliar"}${nf ? ` · <b style="color:var(--erro)">${nf} foto(s) de dano</b>` : ""}${ant?.nota ? ` · anterior: nota ${ant.nota}` : ""}</span></span>
+        <span class="detalhe" style="display:block">${esc(e.regiao || "")} · ${a?.nota != null ? (nd ? `${nd} dano(s)` : "sem dano") : "a avaliar"}${nf ? ` · <b style="color:var(--erro)">${nf} foto(s) de dano</b>` : ""}${ant?.nota ? ` · anterior: nota ${ant.nota}` : semNotaAnterior(o, i) ? ` · <b style="color:var(--alerta)">sem nota na ficha anterior</b>` : ""}</span></span>
       <span class="selo ${a?.nota != null ? (a.nota <= 2 ? "alerta" : "ok") : ""}">${a?.nota != null ? `nota ${a.nota}` : "›"}</span></a>`;
   });
   $("#tela").innerHTML = `
@@ -1126,7 +1130,9 @@ async function telaAvaliacao(vid) {
       <div style="height:8px;background:#e5e9ef;border-radius:4px;margin-top:8px"><div style="height:8px;border-radius:4px;background:var(--ok);width:${Math.round(100 * feitos / o.elementos.length)}%"></div></div>
       <p style="margin-top:10px">${final != null ? `<b>Nota final sugerida: ${final} – ${NOTAS_NORMA[final][0]}</b> (menor nota entre os elementos estruturais avaliados — sem juntas, guarda-corpo/guarda-rodas, pavimento e buzinotes — Anexo C).`
         : "A nota final sugerida aparece quando houver elementos estruturais avaliados."}</p>
-      <p class="suave">${o.anterior ? `Vistoria anterior: ${dataBR(o.anterior.data)} (${esc(o.anterior.arquivo)}).` : "Sem a vistoria anterior no pacote."}</p></div>
+      <p class="suave">${o.anterior ? `Vistoria anterior: ${dataBR(o.anterior.data)} (${esc(o.anterior.arquivo)}).` : "Sem a vistoria anterior no pacote."}</p>
+      ${lacunas.length ? `<p style="color:var(--alerta)"><b>${lacunas.length} elemento(s) ficaram sem nota na ficha anterior</b>
+        (${esc(lacunas.map(i => nomes[i].split(" – ")[0]).join(", "))}): avalie com atenção nesta vistoria.</p>` : ""}</div>
     ${prox >= 0 ? `<div class="botoes"><a class="botao" href="#/elemento/${enc(vid)}/${prox}">Próximo a avaliar: ${esc(nomes[prox].split(" – ")[0])}</a></div>` : ""}
     ${html}`;
 }
@@ -1210,11 +1216,13 @@ async function telaElemento(vid, i) {
     $("#tela").innerHTML = `
       <div class="cartao">
         <h3>Vistoria anterior${o.anterior ? ` (${dataBR(o.anterior.data)})` : ""}</h3>
+        ${ant && ant.nota == null ? `<p style="color:var(--alerta)"><b>Este elemento ficou sem nota na ficha anterior.</b>
+          Registre a nota e os danos dele nesta vistoria (é a chance de completar a ficha).</p>` : ""}
         ${ant ? `<p>Nota: <b>${ant.nota != null ? `${ant.nota} – ${NOTAS_NORMA[ant.nota][0]}` : "não informada na ficha"}</b></p>
           ${ant.dano ? `<p>${esc(ant.dano.dano)}</p><p class="suave">${[ant.dano.quant != null ? `quant. ${ant.dano.quant}` : "", ant.dano.localizacao,
             ant.dano.extensao, ant.dano.ec ? `EC ${ant.dano.ec} - ${ECS_NORMA[ant.dano.ec]}` : ""].filter(Boolean).map(esc).join(" · ")}</p>`
             : `<p class="suave">Sem dano registrado.${ant.nota != null && ant.nota < 5 ? ` A nota ${ant.nota} sem dano estava errada: pela norma, sem dano é nota 5.` : ""}</p>`}
-          <div class="botoes"><button id="copiar" class="botao secundario">Manter como na anterior</button></div>`
+          ${ant.nota != null || ant.dano ? `<div class="botoes"><button id="copiar" class="botao secundario">Manter como na anterior</button></div>` : ""}`
           : `<p class="suave">${e.novo_desde ? "Elemento novo: separado a partir desta vistoria (antes ficava dentro da laje)." : "Este elemento não está na ficha anterior."}</p>`}
       </div>
       ${buzinote ? `<div class="cartao"><h3>Quantidade de buzinotes</h3>
