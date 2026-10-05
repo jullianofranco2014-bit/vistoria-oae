@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.1";
+const VERSAO_APP = "0.7.3";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -216,18 +216,26 @@ function telaDados(primeiroUso) {
 }
 
 /* ---------- tela: início ---------- */
+/* alterações feitas depois da última exportação (item 7, 05/10/2026): até exportar, a vistoria só existe neste celular */
+const naoExportada = v => !!(v.fotos?.length || v.avaliacao?.length || v.anotacoes)
+  && (!v.exportada_em || (v.atualizado_em || "") > v.exportada_em);
+
 async function telaInicio() {
   cabecalho("Vistoria OAE", "UL Palmas · Consórcio Houer-Consane", null);
   const vs = (await BD.todos("vistorias")).sort((a, b) => (b.atualizado_em || "").localeCompare(a.atualizado_em || ""));
+  const pendentes = vs.filter(naoExportada);
   const itens = vs.map(v => {
     const o = Estado.oaes.get(v.oae);
     return `<button class="lista-item" data-id="${esc(v.id)}">
       <div class="linha"><span class="nome">${esc(o ? `${o.item}. ${o.nome}` : v.oae)}</span>
         <span class="selo">${esc(v.tipo_inspecao)}</span></div>
       <div class="detalhe">${dataBR(v.data)} · ${v.fotos.length} foto(s) · ${v.avaliacao.filter(a => a.nota != null).length} elemento(s) avaliado(s)</div>
+      ${naoExportada(v) ? `<div class="detalhe" style="color:var(--alerta);font-weight:600">⚠ ${v.exportada_em ? "alterações depois da última exportação" : "ainda não exportada"}</div>` : ""}
     </button>`;
   }).join("");
   $("#tela").innerHTML = `
+    ${pendentes.length ? `<div class="cartao" style="border-color:var(--alerta)"><p><b>${pendentes.length} vistoria(s) com alterações não exportadas.</b>
+      Até exportar, elas só existem neste celular: exporte ao fim de cada OAE (o arquivo também serve de cópia de segurança).</p></div>` : ""}
     <div class="botoes"><a class="botao" href="#/nova">Nova vistoria</a></div>
     <h2>Vistorias neste celular</h2>
     ${itens || `<div class="vazio">Nenhuma vistoria ainda.</div>`}
@@ -336,7 +344,8 @@ async function telaVistoria(id) {
   const nExtras = v.fotos.filter(f => f.dano && ehExtra(f)).length, nDanos = v.fotos.filter(f => f.dano).length - nExtras;
   const nAvaliados = v.avaliacao.filter(a => a.nota != null).length;
   const an = v.anotacoes || {};
-  const temAnotacoes = !!(an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes);
+  const temAnotacoes = !!(an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes
+    || an.placa?.ano_construcao || an.placa?.trem_tipo);
   // [título, texto, parte futura, link, selo, selo ok?]
   const etapas = [
     ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${enc(v.id)}`,
@@ -346,8 +355,11 @@ async function telaVistoria(id) {
       `#/avaliacao/${enc(v.id)}`, nAvaliados === o.elementos.length ? "concluído" : "abrir ›", nAvaliados === o.elementos.length],
     ["Anotações de campo", "Aspectos especiais, deficiências e observações (os textos da ficha são redigidos depois)", null,
       `#/anotacoes/${enc(v.id)}`, temAnotacoes ? "anotado" : "abrir ›", temAnotacoes],
-    ["Exportar", "Arquivo .zip com a vistoria e as fotos, para o computador", null, `#/exportar/${enc(v.id)}`,
-      v.exportada_em ? `exportada ${new Date(v.exportada_em).toLocaleDateString("pt-BR")}` : "abrir ›", !!v.exportada_em],
+    ["Exportar", naoExportada(v) ? (v.exportada_em ? "Há alterações depois da última exportação: exporte de novo (o arquivo é a cópia de segurança)"
+      : "Ainda não exportada: até exportar, a vistoria só existe neste celular") : "Arquivo .zip com a vistoria e as fotos, para o computador",
+      null, `#/exportar/${enc(v.id)}`,
+      naoExportada(v) ? "exportar ›" : v.exportada_em ? `exportada ${new Date(v.exportada_em).toLocaleDateString("pt-BR")}` : "abrir ›",
+      !naoExportada(v) && !!v.exportada_em],
   ];
   const desenhar = () => {
     const d = GPS.pos && o.lat ? distanciaM(GPS.pos.lat, GPS.pos.lon, o.lat, o.lon) : null;
@@ -1375,6 +1387,15 @@ async function telaAnotacoes(vid) {
     <div id="defensa"></div>
     <label class="campo"><span>Outras / detalhes (opcional)</span>
       <textarea id="deficiencias-texto" rows="2" placeholder="Ex.: defensa ausente só no acesso do E2, lado LD">${esc(a.deficiencias_texto)}</textarea></label>
+    <h2>Placa da OAE (opcional)</h2>
+    <p class="suave">Se a OAE tiver placa, anote o que ela informa. Na importação, o que faltar no cadastro é completado
+      (cadastro hoje: ano de construção <b>${esc(o.ano_construcao ?? "não informado")}</b> · trem-tipo <b>${esc(o.trem_tipo ?? "não informado")}</b>).</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <label class="campo" style="margin:0"><span>Ano de construção</span>
+        <input id="placa-ano" type="text" inputmode="numeric" maxlength="4" placeholder="ex.: 1978" value="${esc(a.placa?.ano_construcao ?? "")}"></label>
+      <label class="campo" style="margin:0"><span>Trem-tipo</span>
+        <input id="placa-trem" type="text" placeholder="ex.: TB-45, Classe 36" value="${esc(a.placa?.trem_tipo ?? "")}"></label>
+    </div>
     <h2>Observações para o laudo</h2>
     <label class="campo"><span>O que você quer que conste no laudo (opcional)</span>
       <textarea id="observacoes" rows="4" placeholder="Ex.: erosão no aterro do A2 avançou desde a vistoria anterior">${esc(a.observacoes)}</textarea></label>
@@ -1426,6 +1447,15 @@ async function telaAnotacoes(vid) {
   for (const [id, campo] of [["#aspectos-texto", "aspectos_texto"], ["#deficiencias-texto", "deficiencias_texto"], ["#observacoes", "observacoes"]]) {
     $(id).oninput = ev => { a[campo] = ev.target.value; };
     $(id).onchange = salvar;
+  }
+  // placa da OAE (item 3): ano de construção (4 dígitos) e trem-tipo, para completar o cadastro
+  for (const [id, campo] of [["#placa-ano", "ano_construcao"], ["#placa-trem", "trem_tipo"]]) {
+    $(id).onchange = ev => {
+      const t = ev.target.value.trim();
+      if (campo === "ano_construcao" && t && !/^(18|19|20)\d\d$/.test(t)) { avisar("Ano de construção: use 4 dígitos (ex.: 1978)."); return; }
+      a.placa = { ...(a.placa || {}), [campo]: campo === "ano_construcao" && t ? Number(t) : (t || null) };
+      salvar();
+    };
   }
 }
 
