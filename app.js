@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.5";
+const VERSAO_APP = "0.7.6";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -901,7 +901,9 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     // posição: a gravada; se não, a da foto do roteiro em que o dano foi visto (já aceita, pode remarcar)
     x: reg ? reg.x : r ? r.x : null, y: reg ? reg.y : r ? r.y : 0.5, direcao: reg ? reg.direcao : r ? r.direcao : null,
     semDirecao: !!reg?.sem_direcao, verTodos: false,
+    reativar: [],   // tipos marcados agora na foto que tinham sido removidos na avaliação do elemento
   };
+  let avLocal = null;   // avaliação do elemento da foto (só para mostrar a seção 5; grava-se campo a campo)
   let modo = (reg ? reg.posicao_marcada : !!r) ? "pronto" : "posicao";
   const legendaAtual = () => f.editada ? f.legenda : montarLegenda(o, f.el, f.danos, f.onde, extra);
   const campos = () => ({
@@ -913,16 +915,38 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   });
   let fila = Promise.resolve();
   const gravar = () => {
-    if (!k) return;
+    if (!k) return Promise.resolve();
     fila = fila.then(async () => {
       const vv = await BD.ler("vistorias", vid);
       const rr = vv.fotos.find(x => x.dano === k);
       if (!rr) return;
       Object.assign(rr, campos());
+      if (!extra) {   // cada tipo de dano marcado é uma linha da avaliação do elemento (seção 5)
+        const a = ligarFotoAvaliacao(vv, o, k, f.el, f.danos, f.onde, f.reativar);
+        f.reativar = [];
+        avLocal = a ? JSON.parse(JSON.stringify(a)) : null;
+      }
       renumerar(vv, o);
       vv.atualizado_em = new Date().toISOString();
       await BD.gravar("vistorias", vv);
     }).catch(e => { console.error(e); avisar("Não foi possível gravar: " + e.message, 5000); });
+    return fila;
+  };
+  // seção 5: um campo da linha do dano (tipo) na avaliação do elemento, gravado direto lá
+  const alterarLinha = (tipo, campo, valor) => {
+    const l = avLocal?.danos.find(d => d.tipo === tipo);
+    if (l) l[campo] = valor;
+    fila = fila.then(async () => {
+      const vv = await BD.ler("vistorias", vid);
+      const i = f.el ? o.elementos.indexOf(f.el) : -1;
+      const a = i >= 0 ? avaliacaoDe(vv, o, i) : null;
+      const d = a?.danos.find(x => x.tipo === tipo);
+      if (!d) return;
+      d[campo] = valor;
+      a.atualizado_em = vv.atualizado_em = new Date().toISOString();
+      await BD.gravar("vistorias", vv);
+    }).catch(e => { console.error(e); avisar("Não foi possível gravar: " + e.message, 5000); });
+    return fila;
   };
 
   const multiTramo = o.tramos.length > 1;
@@ -966,7 +990,9 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
       <button id="add-outro" class="botao" style="width:auto;min-height:48px;padding:8px 14px">Adicionar</button>
     </div>
     <label class="campo"><span>Onde no elemento / extensão (opcional)</span>
-      <input id="onde" type="text" value="${esc(f.onde)}" placeholder="Ex.: face inferior, 1,20 m"></label>`}
+      <input id="onde" type="text" value="${esc(f.onde)}" placeholder="Ex.: face inferior, 1,20 m"></label>
+    <h2>5. Avaliação do dano</h2>
+    <div id="aval"></div>`}
     <label class="campo"><span>${extra ? "4. Legenda" : "Legenda"}</span>
       <textarea id="legenda" rows="3"></textarea></label>
     <div class="botoes" style="margin-top:0"><button id="leg-auto" class="botao secundario">Voltar à legenda automática</button></div>
@@ -986,7 +1012,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     if (f.el && f.x == null) { f.x = centroTramo(o, f.el.tramo); f.y = 0.5; }   // sugestão: meio do tramo
     document.querySelectorAll("#sug input").forEach(i => { i.checked = !!f.el && i.value === chave; });
     $("#el-todos").value = f.el && !sug.includes(f.el) ? chave : "";
-    desenharDanos(); desenharLegenda(); desenharCroqui(); gravar();
+    desenharDanos(); desenharLegenda(); desenharCroqui(); gravar().then(desenharAval);
   };
   // danos: só os do tipo do elemento escolhido (ou todos, a pedido), mais os já marcados e os escritos à mão
   const desenharDanos = () => {
@@ -1002,8 +1028,58 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     document.querySelectorAll("#danos input").forEach(i => {
       i.onchange = () => {
         f.danos = i.checked ? [...f.danos, i.value] : f.danos.filter(x => x !== i.value);
-        desenharLegenda(); gravar();
+        if (i.checked) f.reativar.push(i.value);
+        desenharLegenda(); gravar().then(desenharAval);
       };
+    });
+  };
+  // 5. avaliação do dano: os mesmos campos da avaliação do elemento (usuário, 15/10/2026: é mais fácil preencher na
+  // hora da foto), um cartão por tipo de dano marcado; tudo é gravado na avaliação do elemento (a nota fica lá)
+  const desenharAval = () => {
+    const caixa = $("#aval");
+    if (extra || !caixa) return;
+    if (!k) { caixa.innerHTML = `<p class="suave">Tire a foto para preencher quantidade, extensão e EC do dano.</p>`; return; }
+    if (!f.el || !f.danos.length) { caixa.innerHTML = `<p class="suave">Escolha o elemento e marque o dano para preencher quantidade, extensão e EC.</p>`; return; }
+    const linhas = f.danos.map(t => avLocal?.danos.find(d => d.tipo === t)).filter(Boolean);
+    const fora = f.danos.filter(t => !linhas.some(d => d.tipo === t));
+    caixa.innerHTML = `<p class="suave">Os mesmos campos da avaliação do ${esc(f.el.elemento)}: o que você preencher aqui aparece lá,
+        e pode ser completado depois. A nota do elemento fica na avaliação.</p>`
+      + linhas.map(d => {
+        const aq = alertaQuant(f.el, d);
+        return `<div class="cartao" data-tipo="${esc(d.tipo)}">
+          <div class="linha"><strong>${esc(d.tipo)}</strong>${(d.fotos || []).length > 1 ? `<span class="suave">também em outra(s) foto(s)</span>` : ""}</div>
+          <label class="campo"><span>Dano (descrição)</span><textarea data-campo="dano" rows="2">${esc(d.dano || "")}</textarea></label>
+          <div style="display:grid;grid-template-columns:1fr 2fr;gap:8px">
+            <label class="campo" style="margin:0"><span>Quant.</span><input type="text" inputmode="decimal" data-campo="quant" value="${esc(d.quant ?? "")}"></label>
+            <label class="campo" style="margin:0"><span>Localização</span><input type="text" data-campo="localizacao" value="${esc(d.localizacao || "")}"></label>
+          </div>
+          ${aq ? `<p style="color:var(--alerta)">⚠ ${esc(aq)} — confira a quantidade.</p>` : ""}
+          <label class="campo"><span>Extensão relativa</span><select data-campo="extensao"><option value="">—</option>
+            ${EXTENSOES.map(x => `<option ${d.extensao === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
+          <div class="campo"><span>Estado de condição (EC)</span><div class="ecs">${[4, 3, 2, 1].map(n =>
+            `<button class="ec ${d.ec === n ? "marcada" : ""}" data-ec="${n}">${n} - ${ECS_NORMA[n]}</button>`).join("")}</div></div>
+          <details ${d.insuficiencia || d.causa ? "open" : ""}><summary>Insuficiência estrutural e causa provável (opcional)</summary>
+            <label class="campo"><span>Insuficiência estrutural</span><textarea data-campo="insuficiencia" rows="2">${esc(d.insuficiencia || "")}</textarea></label>
+            <label class="campo"><span>Causa provável</span><textarea data-campo="causa" rows="2">${esc(d.causa || "")}</textarea></label>
+          </details></div>`;
+      }).join("")
+      + (fora.length ? `<p class="suave">${esc(fora.join(", "))}: removido(s) na avaliação do elemento; para voltar, desmarque e marque de novo aqui.</p>` : "");
+    caixa.querySelectorAll("[data-tipo]").forEach(cartao => {
+      const tipo = cartao.dataset.tipo;
+      const linha = () => avLocal?.danos.find(d => d.tipo === tipo);
+      cartao.querySelectorAll("[data-campo]").forEach(c => {
+        const campo = c.dataset.campo;
+        const valor = () => campo === "quant" ? lerQuant(c.value) : (c.value.trim() || null);
+        if (c.tagName === "SELECT") c.onchange = () => alterarLinha(tipo, campo, c.value || null);
+        else {
+          c.oninput = () => { const l = linha(); if (l) l[campo] = valor(); };
+          // quantidade e localização mudam o aviso de quantidade: redesenha ao sair do campo
+          c.onchange = () => { const p = alterarLinha(tipo, campo, valor()); if (["quant", "localizacao"].includes(campo)) p.then(desenharAval); };
+        }
+      });
+      cartao.querySelectorAll("[data-ec]").forEach(b => {
+        b.onclick = () => { alterarLinha(tipo, "ec", Number(b.dataset.ec)); desenharAval(); };
+      });
     });
   };
   document.querySelectorAll("#sug input").forEach(i => { i.onchange = () => escolher(i.value); });
@@ -1061,13 +1137,23 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     $("#add-outro").onclick = () => {
       const t = $("#outro").value.trim();
       if (!t) return avisar("Escreva o dano no campo ao lado.");
-      if (!f.danos.some(d => d.toLowerCase() === t.toLowerCase())) f.danos.push(t);
+      if (!f.danos.some(d => d.toLowerCase() === t.toLowerCase())) { f.danos.push(t); f.reativar.push(t); }
       $("#outro").value = "";
-      desenharDanos(); desenharLegenda(); gravar();
+      desenharDanos(); desenharLegenda(); gravar().then(desenharAval);
     };
     $("#outro").onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); $("#add-outro").click(); } };
     $("#onde").oninput = ev => { f.onde = ev.target.value; desenharLegenda(); };
-    $("#onde").onchange = gravar;
+    // a localização das linhas desta foto acompanha o "Onde", enquanto não for escrita outra na seção 5
+    let ondeGravado = f.onde.trim();
+    $("#onde").onchange = () => {
+      const antes = ondeGravado;
+      ondeGravado = f.onde.trim();
+      for (const l of avLocal?.danos || []) {
+        if ((l.fotos || []).includes(k) && f.danos.includes(l.tipo) && (!l.localizacao || l.localizacao === antes))
+          alterarLinha(l.tipo, "localizacao", ondeGravado || null);
+      }
+      gravar().then(desenharAval);
+    };
   }
   $("#legenda").oninput = ev => { f.legenda = ev.target.value; f.editada = true; $("#leg-auto").hidden = false; };
   $("#legenda").onchange = gravar;
@@ -1100,7 +1186,10 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     };
     const existente = vv.fotos.find(x => x.dano === kk);
     if (existente) Object.assign(existente, base);
-    else vv.fotos.push({ n: 0, ...base, ...campos() });
+    else {
+      vv.fotos.push({ n: 0, ...base, ...campos() });
+      if (!extra) ligarFotoAvaliacao(vv, o, kk, f.el, f.danos, f.onde, f.reativar);   // tipos já marcados antes da foto
+    }
     renumerar(vv, o);
     vv.atualizado_em = new Date().toISOString();
     await BD.gravar("vistorias", vv);
@@ -1129,6 +1218,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     await BD.apagar("fotos", `${vid}#D${k}`);
     const vv = await BD.ler("vistorias", vid);
     vv.fotos = vv.fotos.filter(x => x.dano !== k);
+    ligarFotoAvaliacao(vv, o, k, null, []);   // tira a foto das linhas da avaliação (a linha só desta foto sai)
     renumerar(vv, o);
     vv.atualizado_em = new Date().toISOString();
     await BD.gravar("vistorias", vv);
@@ -1139,6 +1229,13 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   desenharDanos();
   desenharLegenda();
   desenharCroqui();
+  // seção 5 ao abrir: liga a foto à avaliação (fotos de antes da 0.7.6 ou tipos removidos/trocados) e só grava se mudou
+  if (k && !extra) {
+    const copia = JSON.parse(JSON.stringify(v));
+    const a = ligarFotoAvaliacao(copia, o, k, f.el, f.danos, f.onde);
+    if (JSON.stringify(copia.avaliacao) !== JSON.stringify(v.avaliacao)) gravar().then(desenharAval);
+    else { avLocal = a ? JSON.parse(JSON.stringify(a)) : null; desenharAval(); }
+  } else desenharAval();
 }
 
 /* ---------- avaliação dos elementos (Anexo B) ---------- */
@@ -1169,6 +1266,37 @@ function notaSugerida(a) {
 const avaliacaoDe = (v, o, i) => v.avaliacao.find(a => a.indice === i)
   || v.avaliacao.find(a => a.indice == null && a.elemento === o.elementos[i].elemento && a.tramo === o.elementos[i].tramo);
 const fotosDoElemento = (v, o, i) => v.fotos.filter(f => f.dano && !ehExtra(f) && elDoRegistro(o, f) === o.elementos[i]);
+/* quantidade digitada: número (vírgula ou ponto) ou texto livre */
+const lerQuant = t => /^\s*\d+([.,]\d+)?\s*$/.test(t) ? Number(t.replace(",", ".")) : (t.trim() || null);
+
+/* liga a foto de dano k às linhas da avaliação (usuário, 15/10/2026: preencher o dano na hora da foto). Cada tipo de
+ * dano marcado na foto é uma linha da avaliação do elemento dela (criada se faltar, a não ser que tenha sido removida
+ * lá — `reativar` desfaz isso para o tipo marcado agora na foto). A foto sai das linhas de outro elemento (elemento
+ * trocado) e dos tipos desmarcados; a linha criada por foto que fica sem nenhuma foto sai junto.
+ * Devolve a avaliação do elemento da foto (ou null). */
+function ligarFotoAvaliacao(vv, o, k, el, tipos, onde, reativar = []) {
+  const i = el ? o.elementos.indexOf(el) : -1;
+  const doEl = a => i >= 0 && (a.indice === i || (a.indice == null && a.elemento === el.elemento && a.tramo === el.tramo));
+  for (const a of vv.avaliacao) {
+    a.danos = (a.danos || []).filter(d => {
+      if (!(d.fotos || []).includes(k) || (doEl(a) && tipos.includes(d.tipo))) return true;
+      d.fotos = d.fotos.filter(x => x !== k);
+      return d.fotos.length > 0 || d.origem !== "foto";
+    });
+  }
+  if (i < 0) return null;
+  let a = vv.avaliacao.find(x => x.indice === i) || vv.avaliacao.find(doEl);
+  if (!a) { a = { nota: null, danos: [], indice: i, tramo: el.tramo, elemento: el.elemento }; vv.avaliacao.push(a); }
+  a.descartados = (a.descartados || []).filter(t => !reativar.includes(t));
+  for (const tipo of tipos) {
+    const linha = a.danos.find(d => d.tipo === tipo);
+    if (linha) { if (!(linha.fotos || []).includes(k)) linha.fotos = [...(linha.fotos || []), k]; }
+    else if (!a.descartados.includes(tipo))
+      a.danos.push({ dano: tipo, quant: null, localizacao: (onde || "").trim() || null, extensao: null, ec: null,
+        insuficiencia: null, causa: null, fotos: [k], origem: "foto", tipo });
+  }
+  return a;
+}
 /* elemento que ficou sem nota na ficha anterior (lacuna: ex. Aroeira E1, Paraíso C1–C4) — não vale para elemento novo
  * (DR1, A1/A2 desde 02/10/2026), que nem estava na ficha (item 16) */
 const semNotaAnterior = (o, i) => !!o.anterior && !o.elementos[i].novo_desde && o.anterior.elementos?.[i]?.nota == null;
@@ -1278,7 +1406,7 @@ async function telaElemento(vid, i) {
 
   const origem = d => d.fotos?.length ? `das fotos ${d.fotos.map(k => nFoto(k) ? `F${pad(nFoto(k))}` : "(excluída)").join(", ")}`
     : d.origem === "anterior" ? "da vistoria anterior" : "sem foto";
-  const quant = t => /^\s*\d+([.,]\d+)?\s*$/.test(t) ? Number(t.replace(",", ".")) : (t.trim() || null);
+  const quant = lerQuant;
 
   const desenhar = () => {
     const sug = notaSugerida(av);
