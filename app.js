@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.4";
+const VERSAO_APP = "0.7.5";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -97,14 +97,21 @@ function avisar(msg, ms = 3500) {
 }
 
 /* ---------- GPS ---------- */
+// posição da foto (usuário, 15/10/2026): meta de 5 m; até 15 m vale a posição da própria foto; acima disso, a última
+// posição de até 5 m dos últimos 2 min (ver posicaoAgora)
+const GPS_META_M = 5, GPS_LIMITE_M = 15, GPS_ESPERA_MS = 10000, GPS_BOA_IDADE_MS = 120000;
 const GPS = {
-  pos: null, erro: null, _id: null, _parada: null, _ouvintes: new Set(),
+  pos: null, boa: null, erro: null, negado: false, _id: null, _parada: null, _ouvintes: new Set(),
   iniciar() {
     clearTimeout(this._parada);
     if (this._id !== null || !("geolocation" in navigator)) return;
     this._id = navigator.geolocation.watchPosition(
-      p => { this.pos = { lat: p.coords.latitude, lon: p.coords.longitude, prec: p.coords.accuracy, t: p.timestamp }; this.erro = null; this._avisar(); },
-      e => { this.erro = e.code === 1 ? "Permissão de localização negada" : "GPS indisponível"; this._avisar(); },
+      p => {
+        this.pos = { lat: p.coords.latitude, lon: p.coords.longitude, prec: p.coords.accuracy, t: p.timestamp };
+        if (this.pos.prec <= GPS_META_M) this.boa = this.pos;   // última posição boa, para quando o sinal piorar
+        this.erro = null; this.negado = false; this._avisar();
+      },
+      e => { this.negado = e.code === 1; this.erro = this.negado ? "Permissão de localização negada" : "GPS indisponível"; this._avisar(); },
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
   },
   // tela sem GPS (avaliação, anotações…): desliga 30 s depois, para gastar menos bateria e esquentar menos o
@@ -442,12 +449,60 @@ function dms(graus, eixo) {
   return `${gi}°${m}'${s.toFixed(3).padStart(6, "0").replace(".", ",")}" ${h}`;
 }
 
+/* Posição da foto. Em 08/10/2026 a F47 (R25, embaixo do tabuleiro) ficou a 474 m da ponte com precisão de 82 m e o
+ * app aceitou. Agora (usuário, 15/10/2026):
+ * - precisão até 5 m: usa na hora;
+ * - pior: espera até 10 s por uma de até 5 m, guardando a melhor que aparecer;
+ * - se a melhor ficar até 15 m, usa ela (é a posição da própria foto);
+ * - acima de 15 m (ou sem sinal): usa a última posição de até 5 m dos últimos 2 min, marcada com `fonte`;
+ *   sem ela, a melhor que houver (a precisão fica gravada). */
 async function posicaoAgora() {
-  if (GPS.pos && Date.now() - GPS.pos.t < 20000) return GPS.pos;
-  return new Promise(ok => navigator.geolocation ? navigator.geolocation.getCurrentPosition(
-    p => ok({ lat: p.coords.latitude, lon: p.coords.longitude, prec: p.coords.accuracy, t: p.timestamp }),
-    () => ok(GPS.pos || null), { enableHighAccuracy: true, timeout: 12000, maximumAge: 20000 }) : ok(null));
+  const recente = p => p && Date.now() - p.t < 20000 ? p : null;
+  let melhor = recente(GPS.pos);
+  if (melhor && melhor.prec <= GPS_META_M) return melhor;
+  if (!("geolocation" in navigator) || GPS.negado) return melhor;
+  GPS.iniciar();
+  // janela que segura a tela durante a espera (no máximo 10 s): a foto só é gravada no fim, e sair antes para a
+  // próxima foto (câmera aberta) podia fazer o Android fechar a página e perder a gravação. "Gravar já" encerra.
+  const j = document.createElement("div");
+  j.className = "janela";
+  j.innerHTML = `<div class="cartao" role="dialog" aria-modal="true"><h3>Aguardando o GPS</h3>
+    <p id="gps-espera" style="font-weight:600"></p>
+    <p class="suave">Fique nesta tela: a foto é gravada assim que a precisão chegar a ${GPS_META_M} m (no máximo ${GPS_ESPERA_MS / 1000} s).</p>
+    <button class="botao secundario" id="gps-ja">Gravar já</button></div>`;
+  document.body.appendChild(j);
+  const t0 = Date.now();
+  melhor = await new Promise(ok => {
+    let m = melhor, sair = () => {}, feito = false;
+    const mostrar = () => {
+      const s = Math.max(0, Math.ceil((GPS_ESPERA_MS - (Date.now() - t0)) / 1000));
+      j.querySelector("#gps-espera").textContent = `Precisão agora: ${m ? `±${Math.round(m.prec)} m` : "sem sinal"} · ${s} s`;
+    };
+    const relogio = setInterval(mostrar, 500);
+    const terminar = () => {
+      if (feito) return;
+      feito = true;
+      clearTimeout(fim); clearInterval(relogio); sair(); j.remove(); ok(m);
+    };
+    const fim = setTimeout(terminar, GPS_ESPERA_MS);
+    j.querySelector("#gps-ja").onclick = terminar;
+    sair = GPS.ouvir(g => {
+      if (!g.pos) return;
+      if (!m || g.pos.prec < m.prec) m = g.pos;
+      if (m.prec <= GPS_META_M) terminar(); else mostrar();
+    });
+    mostrar();
+  });
+  if (melhor && melhor.prec <= GPS_LIMITE_M) return melhor;
+  const boa = GPS.boa && Date.now() - GPS.boa.t < GPS_BOA_IDADE_MS ? GPS.boa : null;
+  if (boa) return { ...boa, fonte: "ultima_boa", idade_s: Math.round((Date.now() - boa.t) / 1000), prec_atual: melhor ? melhor.prec : null };
+  return melhor;
 }
+
+/* observação gravada na foto quando a posição não é a do momento da foto */
+const obsGPS = pos => pos && pos.fonte === "ultima_boa"
+  ? `GPS fraco na hora da foto (${pos.prec_atual != null ? `±${Math.round(pos.prec_atual)} m` : "sem sinal"}): usada a última posição boa, de ${pos.idade_s} s antes`
+  : null;
 
 async function miniatura(blob, lado = 320) {
   const img = await createImageBitmap(blob);
@@ -591,7 +646,7 @@ async function telaFoto(vid, n) {
     <div id="gps"></div>
     ${foto ? `<div class="cartao"><img src="${url}" alt="Foto R${n}" style="width:100%;border-radius:8px">
       <p class="suave">${reg ? `${esc(reg.data_hora.replace("T", " ").slice(0, 16))} · ${reg.carimbo
-        ? `${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m`
+        ? `${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m${reg.gps_obs ? ` · <span style="color:var(--alerta)">última posição boa (GPS fraco na foto)</span>` : ""}`
         : `<span style="color:var(--alerta)">sem GPS — refaça a foto com a localização ligada</span>`}${reg.azimute != null ? ` · bússola ${rumo(reg.azimute)}` : ""}` : ""}</p></div>` : ""}
     ${st[n] === "pulada" ? `<div class="cartao" style="border-color:var(--alerta)"><b>Marcada como não se aplica:</b> ${esc((v.roteiro_motivos || {})[n] || "")}</div>` : ""}
     <div class="botoes">
@@ -666,7 +721,7 @@ async function telaFoto(vid, n) {
     await BD.gravar("fotos", { id: idFoto, vistoria: vid, roteiro: n, blob: arq, tipo: arq.type, miniatura: await miniatura(arq), criado_em: new Date().toISOString() });
     const registro = {
       n, roteiro: n, arquivo: nomeArq, legenda: r.legenda, x: r.x, y: r.y, direcao: r.direcao, elemento: r.elemento || null,
-      lat: pos ? pos.lat : null, lon: pos ? pos.lon : null, precisao_gps: pos ? pos.prec : null,
+      lat: pos ? pos.lat : null, lon: pos ? pos.lon : null, precisao_gps: pos ? pos.prec : null, gps_obs: obsGPS(pos),
       carimbo: pos ? { lat: dms(pos.lat, "lat"), lon: dms(pos.lon, "lon") } : null,
       azimute: azimute != null ? Math.round(azimute) : null, bussola_confiavel: bussolaOk,
       data_hora: agora.toISOString().slice(0, 19), obs: $("#obs").value.trim(),
@@ -680,7 +735,8 @@ async function telaFoto(vid, n) {
     const dOAE = distFoto(o, registro);
     if (!pos) avisar("Foto salva, mas sem GPS. Confira a localização do celular.", 5000);
     else if (dOAE > LIMITE_FOTO_M) avisar(`Foto salva, mas a ${textoDist(dOAE)} da coordenada da OAE. Confira se está na OAE certa.`, 6000);
-    else if (pos.prec > 30) avisar(`Foto salva com GPS fraco (±${Math.round(pos.prec)} m).`, 4000);
+    else if (pos.fonte === "ultima_boa") avisar(`Foto salva. GPS fraco aqui: usada a última posição boa (de ${pos.idade_s} s antes).`, 5000);
+    else if (pos.prec > GPS_LIMITE_M) avisar(`Foto salva com GPS fraco (±${Math.round(pos.prec)} m).`, 4000);
     else avisar("Foto salva.", 1500);
     // fica na mesma foto (para conferir e, se houver dano, usar o "+ Dano aqui"); "Próxima foto" segue o roteiro
     rotear();
@@ -891,7 +947,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     <div id="gps"></div>
     ${foto ? `<div class="cartao"><img src="${url}" alt="Foto do dano" style="width:100%;border-radius:8px">
       <p class="suave">${esc(reg.data_hora.replace("T", " ").slice(0, 16))} · ${reg.carimbo
-        ? `${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m`
+        ? `${esc(reg.carimbo.lat)} ${esc(reg.carimbo.lon)} · GPS ±${Math.round(reg.precisao_gps)} m${reg.gps_obs ? ` · <span style="color:var(--alerta)">última posição boa (GPS fraco na foto)</span>` : ""}`
         : `<span style="color:var(--alerta)">sem GPS</span>`}${reg.azimute != null ? ` · bússola ${rumo(reg.azimute)}` : ""}</p></div>` : ""}
     <div class="botoes"><label class="botao ${foto ? "secundario" : ""}">${foto ? "Refazer foto" : extra ? "Tirar foto extra" : "Tirar foto do dano"}
       <input id="camera" type="file" accept="image/*" capture="environment" hidden></label></div>
@@ -1037,7 +1093,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     await BD.gravar("fotos", { id: `${vid}#D${kk}`, vistoria: vid, dano: kk, blob: arq, tipo: arq.type, miniatura: await miniatura(arq), criado_em: new Date().toISOString() });
     const base = {
       roteiro: null, dano: kk, arquivo: `${extra ? "X" : "D"}${pad(kk)}_${vv.oae}_${vv.data}.jpg`,
-      lat: pos ? pos.lat : null, lon: pos ? pos.lon : null, precisao_gps: pos ? pos.prec : null,
+      lat: pos ? pos.lat : null, lon: pos ? pos.lon : null, precisao_gps: pos ? pos.prec : null, gps_obs: obsGPS(pos),
       carimbo: pos ? { lat: dms(pos.lat, "lat"), lon: dms(pos.lon, "lon") } : null,
       azimute: azimute != null ? Math.round(azimute) : null, bussola_confiavel: bussolaOk,
       data_hora: agora.toISOString().slice(0, 19),
@@ -1051,6 +1107,8 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     const dOAE = distFoto(o, base);
     if (!pos) avisar("Foto salva, mas sem GPS. Confira a localização do celular.", 5000);
     else if (dOAE > LIMITE_FOTO_M) avisar(`Foto salva, mas a ${textoDist(dOAE)} da coordenada da OAE. Confira se está na OAE certa.`, 6000);
+    else if (pos.fonte === "ultima_boa") avisar(`Foto salva. GPS fraco aqui: usada a última posição boa (de ${pos.idade_s} s antes).`, 5000);
+    else if (pos.prec > GPS_LIMITE_M) avisar(`Foto salva com GPS fraco (±${Math.round(pos.prec)} m).`, 4000);
     else avisar("Foto salva.", 1500);
     // (aberta pela avaliação do elemento: continua lembrando de onde veio, para voltar para lá)
     if (k) rotear(); else location.hash = `#/dano/${enc(vid)}/${kk}${elArg != null ? `/-/${elArg}` : ""}`;
