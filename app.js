@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.6";
+const VERSAO_APP = "0.7.7";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -905,7 +905,13 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   };
   let avLocal = null;   // avaliação do elemento da foto (só para mostrar a seção 5; grava-se campo a campo)
   let modo = (reg ? reg.posicao_marcada : !!r) ? "pronto" : "posicao";
-  const legendaAtual = () => f.editada ? f.legenda : montarLegenda(o, f.el, f.danos, f.onde, extra);
+  // a legenda leva a localização dos danos (seção 5); o campo "Onde no elemento" saiu em 15/10/2026 (usuário) e
+  // só as fotos antigas ainda o têm (f.onde), usado quando não há localização
+  const ondeLegenda = () => {
+    const locs = [...new Set(f.danos.map(t => avLocal?.danos.find(d => d.tipo === t)?.localizacao).filter(Boolean))];
+    return locs.length ? locs.join("; ") : f.onde;
+  };
+  const legendaAtual = () => f.editada ? f.legenda : montarLegenda(o, f.el, f.danos, ondeLegenda(), extra);
   const campos = () => ({
     tipo: extra ? "extra" : "dano",
     perto_de: perto ?? null, elemento: f.el ? f.el.elemento : null, tramo: f.el ? f.el.tramo : null,
@@ -989,8 +995,6 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
       <input id="outro" type="text" placeholder="Outro dano…">
       <button id="add-outro" class="botao" style="width:auto;min-height:48px;padding:8px 14px">Adicionar</button>
     </div>
-    <label class="campo"><span>Onde no elemento / extensão (opcional)</span>
-      <input id="onde" type="text" value="${esc(f.onde)}" placeholder="Ex.: face inferior, 1,20 m"></label>
     <h2>5. Avaliação do dano</h2>
     <div id="aval"></div>`}
     <label class="campo"><span>${extra ? "4. Legenda" : "Legenda"}</span>
@@ -1038,12 +1042,13 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   const desenharAval = () => {
     const caixa = $("#aval");
     if (extra || !caixa) return;
+    desenharLegenda();   // a legenda leva a localização dos danos
     if (!k) { caixa.innerHTML = `<p class="suave">Tire a foto para preencher quantidade, extensão e EC do dano.</p>`; return; }
     if (!f.el || !f.danos.length) { caixa.innerHTML = `<p class="suave">Escolha o elemento e marque o dano para preencher quantidade, extensão e EC.</p>`; return; }
     const linhas = f.danos.map(t => avLocal?.danos.find(d => d.tipo === t)).filter(Boolean);
     const fora = f.danos.filter(t => !linhas.some(d => d.tipo === t));
     caixa.innerHTML = `<p class="suave">Os mesmos campos da avaliação do ${esc(f.el.elemento)}: o que você preencher aqui aparece lá,
-        e pode ser completado depois. A nota do elemento fica na avaliação.</p>`
+        e pode ser completado depois. A nota do elemento fica na avaliação. A localização entra na legenda da foto.</p>`
       + linhas.map(d => {
         const aq = alertaQuant(f.el, d);
         return `<div class="cartao" data-tipo="${esc(d.tipo)}">
@@ -1072,9 +1077,14 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
         const valor = () => campo === "quant" ? lerQuant(c.value) : (c.value.trim() || null);
         if (c.tagName === "SELECT") c.onchange = () => alterarLinha(tipo, campo, c.value || null);
         else {
-          c.oninput = () => { const l = linha(); if (l) l[campo] = valor(); };
-          // quantidade e localização mudam o aviso de quantidade: redesenha ao sair do campo
-          c.onchange = () => { const p = alterarLinha(tipo, campo, valor()); if (["quant", "localizacao"].includes(campo)) p.then(desenharAval); };
+          c.oninput = () => { const l = linha(); if (l) l[campo] = valor(); if (campo === "localizacao") desenharLegenda(); };
+          // quantidade e localização mudam o aviso de quantidade (redesenha ao sair do campo); a localização também
+          // muda a legenda, gravada na foto
+          c.onchange = () => {
+            const p = alterarLinha(tipo, campo, valor());
+            if (campo === "localizacao") gravar().then(desenharAval);
+            else if (campo === "quant") p.then(desenharAval);
+          };
         }
       });
       cartao.querySelectorAll("[data-ec]").forEach(b => {
@@ -1142,18 +1152,6 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
       desenharDanos(); desenharLegenda(); gravar().then(desenharAval);
     };
     $("#outro").onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); $("#add-outro").click(); } };
-    $("#onde").oninput = ev => { f.onde = ev.target.value; desenharLegenda(); };
-    // a localização das linhas desta foto acompanha o "Onde", enquanto não for escrita outra na seção 5
-    let ondeGravado = f.onde.trim();
-    $("#onde").onchange = () => {
-      const antes = ondeGravado;
-      ondeGravado = f.onde.trim();
-      for (const l of avLocal?.danos || []) {
-        if ((l.fotos || []).includes(k) && f.danos.includes(l.tipo) && (!l.localizacao || l.localizacao === antes))
-          alterarLinha(l.tipo, "localizacao", ondeGravado || null);
-      }
-      gravar().then(desenharAval);
-    };
   }
   $("#legenda").oninput = ev => { f.legenda = ev.target.value; f.editada = true; $("#leg-auto").hidden = false; };
   $("#legenda").onchange = gravar;
@@ -1233,8 +1231,11 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   if (k && !extra) {
     const copia = JSON.parse(JSON.stringify(v));
     const a = ligarFotoAvaliacao(copia, o, k, f.el, f.danos, f.onde);
-    if (JSON.stringify(copia.avaliacao) !== JSON.stringify(v.avaliacao)) gravar().then(desenharAval);
-    else { avLocal = a ? JSON.parse(JSON.stringify(a)) : null; desenharAval(); }
+    avLocal = a ? JSON.parse(JSON.stringify(a)) : null;
+    // grava se a ligação mudou ou se a legenda automática mudou (localização preenchida depois, na avaliação)
+    if (JSON.stringify(copia.avaliacao) !== JSON.stringify(v.avaliacao) || (!f.editada && legendaAtual() !== reg.legenda))
+      gravar().then(desenharAval);
+    else desenharAval();
   } else desenharAval();
 }
 
@@ -1397,6 +1398,12 @@ async function telaElemento(vid, i) {
       av.atualizado_em = new Date().toISOString();
       vv.avaliacao = [...vv.avaliacao.filter(x => !(x.indice === i
         || (x.indice == null && x.elemento === e.elemento && x.tramo === e.tramo))), JSON.parse(JSON.stringify(av))];
+      // a legenda automática das fotos deste elemento leva a localização dos danos (0.7.7): acompanha a mudança aqui
+      for (const fo of vv.fotos) {
+        if (!fo.dano || ehExtra(fo) || fo.legenda_editada || elDoRegistro(o, fo) !== e) continue;
+        const locs = [...new Set((fo.danos || []).map(t => av.danos.find(d => d.tipo === t)?.localizacao).filter(Boolean))];
+        fo.legenda = montarLegenda(o, e, fo.danos || [], locs.length ? locs.join("; ") : (fo.onde || ""));
+      }
       vv.atualizado_em = av.atualizado_em;
       await BD.gravar("vistorias", vv);
     }).catch(err => { console.error(err); avisar("Não foi possível gravar: " + err.message, 5000); });
