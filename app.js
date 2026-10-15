@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.3";
+const VERSAO_APP = "0.7.4";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -98,13 +98,23 @@ function avisar(msg, ms = 3500) {
 
 /* ---------- GPS ---------- */
 const GPS = {
-  pos: null, erro: null, _id: null, _ouvintes: new Set(),
+  pos: null, erro: null, _id: null, _parada: null, _ouvintes: new Set(),
   iniciar() {
+    clearTimeout(this._parada);
     if (this._id !== null || !("geolocation" in navigator)) return;
     this._id = navigator.geolocation.watchPosition(
       p => { this.pos = { lat: p.coords.latitude, lon: p.coords.longitude, prec: p.coords.accuracy, t: p.timestamp }; this.erro = null; this._avisar(); },
       e => { this.erro = e.code === 1 ? "Permissão de localização negada" : "GPS indisponível"; this._avisar(); },
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+  },
+  // tela sem GPS (avaliação, anotações…): desliga 30 s depois, para gastar menos bateria e esquentar menos o
+  // celular no sol (campo, 15/10/2026); as telas de foto ligam de novo com iniciar()
+  pararDepois() {
+    clearTimeout(this._parada);
+    this._parada = setTimeout(() => {
+      if (this._id !== null) { navigator.geolocation.clearWatch(this._id); this._id = null; }
+      this.pos = null;
+    }, 30000);
   },
   ouvir(fn) { this._ouvintes.add(fn); return () => this._ouvintes.delete(fn); },
   _avisar() { this._ouvintes.forEach(fn => fn(this)); },
@@ -150,6 +160,8 @@ function cabecalho(titulo, subtitulo, voltar) {
 
 async function rotear() {
   if (desligarGPS) { desligarGPS(); desligarGPS = null; }
+  GPS.pararDepois();   // a tela nova chama GPS.iniciar() se precisar
+  Bussola.parar();
   window.scrollTo(0, 0);
   const partes = location.hash.replace(/^#\/?/, "").split("/");
   const [rota, arg] = partes;
@@ -394,10 +406,9 @@ async function telaVistoria(id) {
 
 /* ---------- bússola: azimute para onde aponta a câmera traseira ---------- */
 const Bussola = {
-  azimute: null, confiavel: false, _ok: false,
+  azimute: null, confiavel: false, _evento: null, _fn: null,
   iniciar() {
-    if (this._ok) return;
-    this._ok = true;
+    if (this._fn) return;
     const tratar = (e, absoluto) => {
       if (e.alpha == null) return;
       const r = Math.PI / 180, a = e.alpha * r, b = (e.beta || 0) * r, g = (e.gamma || 0) * r;
@@ -408,8 +419,16 @@ const Bussola = {
       this.azimute = (Math.atan2(vx, vy) / r + 360) % 360;
       this.confiavel = absoluto;
     };
-    if ("ondeviceorientationabsolute" in window) window.addEventListener("deviceorientationabsolute", e => tratar(e, true));
-    else window.addEventListener("deviceorientation", e => tratar(e, !!e.absolute));
+    const absoluto = "ondeviceorientationabsolute" in window;
+    this._evento = absoluto ? "deviceorientationabsolute" : "deviceorientation";
+    this._fn = absoluto ? e => tratar(e, true) : e => tratar(e, !!e.absolute);
+    window.addEventListener(this._evento, this._fn);
+  },
+  // fora das telas de foto os sensores ficam desligados (menos bateria e menos calor)
+  parar() {
+    if (this._fn) { window.removeEventListener(this._evento, this._fn); this._fn = null; }
+    this.azimute = null;
+    this.confiavel = false;
   },
 };
 const rumo = az => az == null ? "" : `${Math.round(az)}° ${["N", "NE", "L", "SE", "S", "SO", "O", "NO"][Math.round(az / 45) % 8]}`;
@@ -810,8 +829,9 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   const oQue = extra ? "foto extra" : "foto de dano";
   const perto = reg ? reg.perto_de : pertoArg;
   const r = perto != null ? o.roteiro.find(x => x.n === perto) : null;
-  // volta para onde veio: a foto do roteiro, a avaliação do elemento ou a lista de fotos de dano
-  const voltar = r ? `#/foto/${enc(vid)}/${r.n}` : elArg != null ? `#/elemento/${enc(vid)}/${elArg}` : `#/danos/${enc(vid)}`;
+  // volta para onde veio: a avaliação do elemento (quando aberta por ela, mesmo que a foto tenha sido tirada junto a
+  // uma foto do roteiro — campo, 15/10/2026), a foto do roteiro ou a lista de fotos de dano
+  const voltar = elArg != null ? `#/elemento/${enc(vid)}/${elArg}` : r ? `#/foto/${enc(vid)}/${r.n}` : `#/danos/${enc(vid)}`;
   cabecalho(reg ? `${extra ? "Foto extra" : "Foto de dano"} F${pad(reg.n)}` : `Nova ${oQue}`,
     `${r ? `junto à R${pad(r.n)} · ` : ""}${o.item}. ${o.nome}`, voltar);
   GPS.iniciar();
@@ -1245,7 +1265,7 @@ async function telaElemento(vid, i) {
             <input id="bz-dan" type="text" inputmode="numeric" value="${esc(av.danificados ?? "")}"></label>
         </div></div>` : ""}
       <h2>Fotos de dano deste elemento</h2>
-      ${fotos.length ? `<div class="miniaturas">${fotos.map((f, j) => `<a href="#/dano/${enc(vid)}/${f.dano}"><img src="${minis[j]?.miniatura || ""}" alt="F${pad(f.n)}"><span>F${pad(f.n)}</span></a>`).join("")}</div>` : `<p class="suave">Nenhuma foto de dano deste elemento.</p>`}
+      ${fotos.length ? `<div class="miniaturas">${fotos.map((f, j) => `<a href="#/dano/${enc(vid)}/${f.dano}/-/${i}"><img src="${minis[j]?.miniatura || ""}" alt="F${pad(f.n)}"><span>F${pad(f.n)}</span></a>`).join("")}</div>` : `<p class="suave">Nenhuma foto de dano deste elemento.</p>`}
       <div class="botoes"><a class="botao secundario" href="#/dano/${enc(vid)}/novo/-/${i}">+ Foto de dano deste elemento</a></div>
       <h2>Danos nesta vistoria</h2>
       ${av.danos.map((d, j) => `
