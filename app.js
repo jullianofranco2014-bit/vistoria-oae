@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.7";
+const VERSAO_APP = "0.7.8";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -134,25 +134,43 @@ const GPS = {
 };
 
 /* ---------- estado ---------- */
-const Estado = { pacote: null, oaes: new Map() };
+const Estado = { pacote: null, oaes: new Map(), ul: null };
 
 async function carregarPacote() {
   const p = await BD.ler("chaves", "pacote");
   Estado.pacote = p || null;
   Estado.oaes = new Map((p?.oaes || []).map(o => [o.id, o]));
+  Estado.ul = p ? unidadeDe(p) : null;
 }
 
+/* unidade (UL) do pacote: "pacote-oaes-ulgurupi" → "ulgurupi" (UL Gurupi). Desde 16/10/2026 o app aceita o pacote de
+ * qualquer UL, um por vez. Cada vistoria guarda a sua UL (sem ela, é da UL Palmas): os códigos das OAEs se repetem
+ * entre ULs (corrego-grotao, rio-tocantins), então a vistoria de outra UL não abre com o pacote carregado. */
+const unidadeDe = p => (p?.tipo || "").replace(/^pacote-oaes-/, "");
+const nomeUnidade = ul => /^ul./.test(ul || "") ? `UL ${ul[2].toUpperCase()}${ul.slice(3)}` : (ul || "").toUpperCase();
+const ulDe = v => v.ul || "ulpalmas";
+const oaeDe = v => v && ulDe(v) === Estado.ul ? Estado.oaes.get(v.oae) : undefined;
+
 function validarPacote(p) {
-  if (!p || p.tipo !== "pacote-oaes-ulpalmas" || !Array.isArray(p.oaes) || !p.oaes.length)
+  if (!p || !/^pacote-oaes-[a-z0-9]+$/.test(p.tipo || "") || !Array.isArray(p.oaes) || !p.oaes.length)
     throw new Error("Arquivo não é um pacote de OAEs válido (gerado pelo exportar_app.py).");
   return p;
 }
 
 async function instalarPacote(p) {
   validarPacote(p);
+  const nova = unidadeDe(p);
+  if (Estado.pacote && Estado.ul !== nova) {
+    const vs = (await BD.todos("vistorias")).filter(v => ulDe(v) === Estado.ul);
+    const pend = vs.filter(naoExportada).length;
+    if (!confirm(`O celular está com o pacote da ${nomeUnidade(Estado.ul)}. Carregar o da ${nomeUnidade(nova)} troca a lista de OAEs.\n\n`
+      + `As ${vs.length} vistoria(s) da ${nomeUnidade(Estado.ul)} continuam guardadas e voltam a abrir quando você carregar de novo o pacote dela.`
+      + (pend ? `\n\nAtenção: ${pend} delas ainda não foram exportadas.` : "") + "\n\nTrocar de UL?"))
+      throw new Error("Pacote não carregado.");
+  }
   await BD.gravar("chaves", p, "pacote");
   await carregarPacote();
-  avisar(`${p.oaes.length} OAEs carregadas (pacote de ${p.gerado_em}).`);
+  avisar(`${nomeUnidade(nova)}: ${p.oaes.length} OAEs carregadas (pacote de ${p.gerado_em}).`);
 }
 
 /* ---------- navegação ---------- */
@@ -203,11 +221,12 @@ function telaDados(primeiroUso) {
   const p = Estado.pacote;
   $("#tela").innerHTML = `
     ${primeiroUso ? `<div class="cartao"><h3>Primeiro uso</h3>
-      <p>Carregue o arquivo <b>oaes_ulpalmas.json</b> (gerado no computador pelo <code>exportar_app.py</code>).
-      Depois disso o app funciona sem internet.</p></div>` : ""}
+      <p>Carregue o pacote das OAEs da sua UL (ex.: <b>oaes_ulpalmas.json</b>, <b>oaes_ulgurupi.json</b>), gerado no computador
+      pelo <code>exportar_app.py</code>. Depois disso o app funciona sem internet.</p></div>` : ""}
     ${p ? `<div class="cartao"><h3>Pacote atual</h3>
-      <p>${p.oaes.length} OAEs · gerado em ${esc(p.gerado_em)}</p>
-      <p class="suave">Carregar um pacote novo substitui os dados das OAEs. As vistorias já feitas não são apagadas.</p></div>` : ""}
+      <p><b>${esc(nomeUnidade(Estado.ul))}</b> · ${p.oaes.length} OAEs · gerado em ${esc(p.gerado_em)}</p>
+      <p class="suave">Carregar um pacote novo substitui os dados das OAEs. As vistorias já feitas não são apagadas;
+      as de outra UL ficam guardadas e abrem quando o pacote dela for carregado.</p></div>` : ""}
     <div class="botoes">
       <label class="botao">Escolher arquivo do pacote
         <input id="arquivo" type="file" accept=".json,application/json" hidden></label>
@@ -240,11 +259,18 @@ const naoExportada = v => !!(v.fotos?.length || v.avaliacao?.length || v.anotaco
   && (!v.exportada_em || (v.atualizado_em || "") > v.exportada_em);
 
 async function telaInicio() {
-  cabecalho("Vistoria OAE", "UL Palmas · Consórcio Houer-Consane", null);
-  const vs = (await BD.todos("vistorias")).sort((a, b) => (b.atualizado_em || "").localeCompare(a.atualizado_em || ""));
-  const pendentes = vs.filter(naoExportada);
+  cabecalho("Vistoria OAE", Estado.ul === "ulpalmas" ? "UL Palmas · Consórcio Houer-Consane" : nomeUnidade(Estado.ul), null);
+  const todas = (await BD.todos("vistorias")).sort((a, b) => (b.atualizado_em || "").localeCompare(a.atualizado_em || ""));
+  const pendentes = todas.filter(naoExportada);   // de todas as ULs: até exportar, só existem neste celular
+  const vs = todas.filter(v => ulDe(v) === Estado.ul);
+  // vistorias de outra UL: guardadas, só abrem com o pacote dela
+  const outras = todas.filter(v => ulDe(v) !== Estado.ul).map(v => `<div class="lista-item" style="opacity:.75">
+      <div class="linha"><span class="nome">${esc(v.oae)}</span><span class="selo">${esc(nomeUnidade(ulDe(v)))}</span></div>
+      <div class="detalhe">${dataBR(v.data)} · ${v.fotos.length} foto(s) · ${esc(v.tipo_inspecao)}</div>
+      ${naoExportada(v) ? `<div class="detalhe" style="color:var(--alerta);font-weight:600">⚠ ${v.exportada_em ? "alterações depois da última exportação" : "ainda não exportada"}</div>` : ""}
+    </div>`).join("");
   const itens = vs.map(v => {
-    const o = Estado.oaes.get(v.oae);
+    const o = oaeDe(v);
     return `<button class="lista-item" data-id="${esc(v.id)}">
       <div class="linha"><span class="nome">${esc(o ? `${o.item}. ${o.nome}` : v.oae)}</span>
         <span class="selo">${esc(v.tipo_inspecao)}</span></div>
@@ -258,9 +284,10 @@ async function telaInicio() {
     <div class="botoes"><a class="botao" href="#/nova">Nova vistoria</a></div>
     <h2>Vistorias neste celular</h2>
     ${itens || `<div class="vazio">Nenhuma vistoria ainda.</div>`}
+    ${outras ? `<h2>De outra UL (carregue o pacote dela para abrir)</h2>${outras}` : ""}
     <h2>Dados</h2>
     <a class="lista-item" href="#/dados"><span class="nome">Dados das OAEs</span>
-      <div class="detalhe">${Estado.oaes.size} OAEs · pacote de ${esc(Estado.pacote.gerado_em)}</div></a>
+      <div class="detalhe">${esc(nomeUnidade(Estado.ul))} · ${Estado.oaes.size} OAEs · pacote de ${esc(Estado.pacote.gerado_em)}</div></a>
     <p class="suave" style="text-align:center">Versão ${VERSAO_APP}</p>`;
   $("#tela").querySelectorAll("[data-id]").forEach(b => b.onclick = () => { location.hash = `#/vistoria/${encodeURIComponent(b.dataset.id)}`; });
 }
@@ -323,7 +350,7 @@ function formNova(oaeId) {
     while (existentes.has(id)) id = `${o.id}_${data}_${n++}`;
     const agora = new Date().toISOString();
     const v = {
-      id, oae: o.id, data, tipo_inspecao: $("input[name=tipo]:checked").value,
+      id, ul: Estado.ul, oae: o.id, data, tipo_inspecao: $("input[name=tipo]:checked").value,
       equipe: $("#equipe").value.trim(), pasta_fotos: null,
       fotos: [], avaliacao: [], aspectos_especiais: "", deficiencias_funcionais: [],
       observacao_anexo_b: "", observacoes: "", laudo: "",
@@ -354,8 +381,10 @@ function cartaoOAE(o, dist) {
 async function telaVistoria(id) {
   const v = await BD.ler("vistorias", id);
   if (!v) { avisar("Vistoria não encontrada."); location.hash = "#/"; return; }
-  const o = Estado.oaes.get(v.oae);
-  if (!o) { $("#tela").innerHTML = `<div class="cartao"><p>A OAE ${esc(v.oae)} não está no pacote de dados atual.</p></div>`; return; }
+  const o = oaeDe(v);
+  if (!o) { $("#tela").innerHTML = `<div class="cartao"><p>${ulDe(v) !== Estado.ul
+    ? `Esta vistoria é da ${esc(nomeUnidade(ulDe(v)))}: carregue o pacote dessa UL para abri-la.`
+    : `A OAE ${esc(v.oae)} não está no pacote de dados atual.`}</p></div>`; return; }
   cabecalho(`${o.item}. ${o.nome}`, `${v.tipo_inspecao} · ${dataBR(v.data)}`, "#/");
   GPS.iniciar();
   const st = v.roteiro_status || {};
@@ -585,7 +614,7 @@ function renumerar(v, o) {
 /* ---------- tela: roteiro de fotos ---------- */
 async function telaRoteiro(vid) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   if (!o) { location.hash = "#/"; return; }
   cabecalho("Roteiro de fotos", `${o.item}. ${o.nome}`, `#/vistoria/${encodeURIComponent(vid)}`);
   GPS.iniciar();
@@ -620,7 +649,7 @@ const MOTIVOS_PULAR = ["OAE não tem este elemento", "Acesso impossível (vegeta
 
 async function telaFoto(vid, n) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   const r = o && o.roteiro.find(x => x.n === n);
   if (!r) { location.hash = `#/roteiro/${encodeURIComponent(vid)}`; return; }
   const L = o.tramos.reduce((a, t) => a + (t.extensao_m || 0), 0) || o.comprimento_m;
@@ -848,7 +877,7 @@ const danoCompleto = d => d.posicao_marcada && (ehExtra(d) ? !!d.legenda : d.ele
 
 async function telaDanos(vid) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   if (!o) { location.hash = "#/"; return; }
   cabecalho("Fotos de dano e extras", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
   const danos = v.fotos.filter(f => f.dano).sort((a, b) => a.n - b.n);
@@ -875,7 +904,7 @@ async function telaDanos(vid) {
  * Antes da foto, o que for preenchido fica só na tela; depois da foto, cada mudança é gravada na hora. */
 async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   if (!o) { location.hash = "#/"; return; }
   const k = kArg === "novo" ? null : Number(kArg);
   const reg = k ? v.fotos.find(f => f.dano === k) : null;
@@ -1324,7 +1353,7 @@ function alertasQuant(v, o) {
 
 async function telaAvaliacao(vid) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   if (!o) { location.hash = "#/"; return; }
   cabecalho("Avaliação dos elementos", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
   const nomes = nomesElementos(o);
@@ -1360,7 +1389,7 @@ async function telaAvaliacao(vid) {
  * Cada mudança é gravada na hora. */
 async function telaElemento(vid, i) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   const e = o && o.elementos[i];
   if (!e) { location.hash = o ? `#/avaliacao/${enc(vid)}` : "#/"; return; }
   const nomes = nomesElementos(o);
@@ -1571,7 +1600,7 @@ const DEFICIENCIAS = ["Ponte sem acostamento", "Pista mais estreita que a rodovi
 
 async function telaAnotacoes(vid) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   if (!o) { location.hash = "#/"; return; }
   cabecalho("Anotações de campo", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
   const a = { aspectos: [], aspectos_texto: "", deficiencias: [], deficiencias_texto: "", observacoes: "", ...(v.anotacoes || {}) };
@@ -1766,7 +1795,7 @@ function conferencia(v, o) {
 
 async function telaExportar(vid) {
   const v = await BD.ler("vistorias", vid);
-  const o = v && Estado.oaes.get(v.oae);
+  const o = v && oaeDe(v);
   if (!o) { location.hash = "#/"; return; }
   cabecalho("Exportar vistoria", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
   const conf = conferencia(v, o);
