@@ -412,8 +412,7 @@ async function telaVistoria(id) {
   const nAvaliados = o.elementos.filter((e, i) => elementoCompleto(v, o, i)).length;
   const nFaltaDado = o.elementos.filter((e, i) => avaliacaoDe(v, o, i)?.nota != null && !elementoCompleto(v, o, i)).length;
   const an = v.anotacoes || {};
-  const temAnotacoes = !!(an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes
-    || an.placa?.ano_construcao || an.placa?.trem_tipo);
+  const temAnotacoes = !!(an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes);
   // [título, texto, parte futura, link, selo, selo ok?]
   const etapas = [
     ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${enc(v.id)}`,
@@ -1736,15 +1735,6 @@ async function telaAnotacoes(vid) {
     <div id="defensa"></div>
     <label class="campo"><span>Outras / detalhes (opcional)</span>
       <textarea id="deficiencias-texto" rows="2" placeholder="Ex.: defensa ausente só no acesso do E2, lado LD">${esc(a.deficiencias_texto)}</textarea></label>
-    <h2>Placa da OAE (opcional)</h2>
-    <p class="suave">Se a OAE tiver placa, anote o que ela informa. Na importação, o que faltar no cadastro é completado
-      (cadastro hoje: ano de construção <b>${esc(o.ano_construcao ?? "não informado")}</b> · trem-tipo <b>${esc(o.trem_tipo ?? "não informado")}</b>).</p>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-      <label class="campo" style="margin:0"><span>Ano de construção</span>
-        <input id="placa-ano" type="text" inputmode="numeric" maxlength="4" placeholder="ex.: 1978" value="${esc(a.placa?.ano_construcao ?? "")}"></label>
-      <label class="campo" style="margin:0"><span>Trem-tipo</span>
-        <input id="placa-trem" type="text" placeholder="ex.: TB-45, Classe 36" value="${esc(a.placa?.trem_tipo ?? "")}"></label>
-    </div>
     <h2>Observações para o laudo</h2>
     <label class="campo"><span>O que você quer que conste no laudo (opcional)</span>
       <textarea id="observacoes" rows="4" placeholder="Ex.: erosão no aterro do A2 avançou desde a vistoria anterior">${esc(a.observacoes)}</textarea></label>
@@ -1797,15 +1787,8 @@ async function telaAnotacoes(vid) {
     $(id).oninput = ev => { a[campo] = ev.target.value; };
     $(id).onchange = salvar;
   }
-  // placa da OAE (item 3): ano de construção (4 dígitos) e trem-tipo, para completar o cadastro
-  for (const [id, campo] of [["#placa-ano", "ano_construcao"], ["#placa-trem", "trem_tipo"]]) {
-    $(id).onchange = ev => {
-      const t = ev.target.value.trim();
-      if (campo === "ano_construcao" && t && !/^(18|19|20)\d\d$/.test(t)) { avisar("Ano de construção: use 4 dígitos (ex.: 1978)."); return; }
-      a.placa = { ...(a.placa || {}), [campo]: campo === "ano_construcao" && t ? Number(t) : (t || null) };
-      salvar();
-    };
-  }
+  // a placa da OAE (ano de construção e trem-tipo, desde 05/10/2026) saiu em 27/10/2026, a pedido do usuário; o que
+  // já foi anotado em vistorias antigas continua em v.anotacoes.placa e o importar_vistoria.py ainda o usa
 }
 
 /* ---------- exportar (parte 6.1) ----------
