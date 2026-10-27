@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.9";
+const VERSAO_APP = "0.7.10";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
