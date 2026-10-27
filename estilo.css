@@ -140,3 +140,10 @@ details summary { cursor: pointer; color: var(--azul); font-weight: 600; margin:
 .miniaturas { display: flex; flex-wrap: wrap; gap: 8px; }
 .miniaturas a { display: flex; flex-direction: column; align-items: center; text-decoration: none; color: var(--suave); font-size: .8rem; font-weight: 600; }
 .miniaturas img { width: 84px; height: 63px; object-fit: cover; border-radius: 6px; border: 1px solid var(--borda); }
+/* campos obrigatórios do dano (0.7.9): "*" no rótulo; em vermelho os que ficaram vazios na hora de concluir */
+.obrig { color: var(--erro); }
+.campo.falta > span { color: var(--erro); }
+.campo.falta input, .campo.falta textarea, .campo.falta select { border: 2px solid var(--erro); background: #fdecea; }
+.campo.falta .ecs, .notas.falta { outline: 2px solid var(--erro); outline-offset: 3px; border-radius: 10px; }
+.faltas { margin: 6px 0 4px; padding-left: 20px; }
+.faltas li { margin: 4px 0; }

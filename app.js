@@ -10,7 +10,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.7.8";
+const VERSAO_APP = "0.7.9";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -83,6 +83,24 @@ function escolher(titulo, opcoes, outro = "Outro (escrever)") {
         return;
       }
       fim(opcoes[Number(b.dataset.i)]);
+    };
+    document.body.appendChild(j);
+  });
+}
+
+/* janela com a lista do que falta preencher; devolve o índice do botão tocado (0 = o primeiro; tocar fora = 0) */
+function janelaFaltas(titulo, itens, botoes = ["Preencher agora"]) {
+  return new Promise(ok => {
+    const j = document.createElement("div");
+    j.className = "janela";
+    j.innerHTML = `<div class="cartao" role="alertdialog" aria-modal="true"><h3>${esc(titulo)}</h3>
+      <ul class="faltas">${itens.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
+      ${botoes.map((t, i) => `<button class="botao ${i ? "secundario" : ""}" data-i="${i}">${esc(t)}</button>`).join("")}</div>`;
+    j.onclick = ev => {
+      const b = ev.target.closest("button");
+      if (ev.target !== j && !b) return;
+      j.remove();
+      ok(b ? Number(b.dataset.i) : 0);
     };
     document.body.appendChild(j);
   });
@@ -390,7 +408,9 @@ async function telaVistoria(id) {
   const st = v.roteiro_status || {};
   const feitas = o.roteiro.filter(r => st[r.n]).length;
   const nExtras = v.fotos.filter(f => f.dano && ehExtra(f)).length, nDanos = v.fotos.filter(f => f.dano).length - nExtras;
-  const nAvaliados = v.avaliacao.filter(a => a.nota != null).length;
+  // avaliado = completo (nota e campos obrigatórios dos danos); os que têm nota mas falta dado aparecem à parte
+  const nAvaliados = o.elementos.filter((e, i) => elementoCompleto(v, o, i)).length;
+  const nFaltaDado = o.elementos.filter((e, i) => avaliacaoDe(v, o, i)?.nota != null && !elementoCompleto(v, o, i)).length;
   const an = v.anotacoes || {};
   const temAnotacoes = !!(an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes
     || an.placa?.ano_construcao || an.placa?.trem_tipo);
@@ -399,7 +419,8 @@ async function telaVistoria(id) {
     ["Roteiro de fotos", `${feitas} de ${o.roteiro.length} fotos padrão do protocolo`, null, `#/roteiro/${enc(v.id)}`,
       feitas === o.roteiro.length ? "concluído" : "abrir ›", feitas === o.roteiro.length],
     ["Fotos de dano e extras", `${nDanos} de dano · ${nExtras} extra(s)`, null, `#/danos/${enc(v.id)}`, "abrir ›", false],
-    ["Avaliação dos elementos", `${nAvaliados} de ${o.elementos.length} elementos avaliados · nota e danos`, null,
+    ["Avaliação dos elementos", `${nAvaliados} de ${o.elementos.length} elementos avaliados · nota e danos${nFaltaDado
+      ? ` · <b style="color:var(--alerta)">${nFaltaDado} com dado faltando</b>` : ""}`, null,
       `#/avaliacao/${enc(v.id)}`, nAvaliados === o.elementos.length ? "concluído" : "abrir ›", nAvaliados === o.elementos.length],
     ["Anotações de campo", "Aspectos especiais, deficiências e observações (os textos da ficha são redigidos depois)", null,
       `#/anotacoes/${enc(v.id)}`, temAnotacoes ? "anotado" : "abrir ›", temAnotacoes],
@@ -629,8 +650,9 @@ async function telaRoteiro(vid) {
     html += `<a class="lista-item linha" href="#/foto/${encodeURIComponent(vid)}/${r.n}" style="align-items:center">
       ${f ? `<img src="${f.miniatura}" alt="" style="width:64px;height:48px;object-fit:cover;border-radius:6px;flex:none">`
           : `<span style="width:64px;height:48px;border-radius:6px;flex:none;display:grid;place-items:center;background:#eef2f7;color:#5a6472;font-weight:700">R${String(r.n).padStart(2, "0")}</span>`}
-      <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(r.legenda)}</span>
-        <span class="detalhe" style="display:block">${DIRECAO[r.direcao] || ""}${r.elemento ? ` · ${esc(r.elemento)}` : ""}${nd ? ` · <b style="color:var(--erro)">${nd} dano(s)</b>` : ""}${nx ? ` · ${nx} extra(s)` : ""}</span></span>
+      <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(nomeFoto(r))}</span>
+        <span class="detalhe" style="display:block">${[r.titulo ? "" : DIRECAO[r.direcao], r.elemento ? `elemento ${esc(r.elemento)}` : "",
+          nd ? `<b style="color:var(--erro)">${nd} dano(s)</b>` : "", nx ? `${nx} extra(s)` : ""].filter(Boolean).join(" · ")}</span></span>
       <span class="selo ${s === "feita" ? "ok" : s === "pulada" ? "alerta" : ""}">${s === "feita" ? "✓" : s === "pulada" ? "n/a" : "›"}</span></a>`;
   }
   const prox = o.roteiro.find(r => !st[r.n]);
@@ -641,6 +663,8 @@ async function telaRoteiro(vid) {
     ${prox ? `<div class="botoes"><a class="botao" href="#/foto/${encodeURIComponent(vid)}/${prox.n}">Próxima pendente: R${String(prox.n).padStart(2, "0")}</a></div>` : ""}
     ${html}`;
 }
+/* nome da foto do roteiro na tela: o título curto (pacotes desde 27/10/2026); pacote antigo, a legenda do relatório */
+const nomeFoto = r => r.titulo || r.legenda;
 
 /* ---------- tela: uma foto do roteiro ---------- */
 /* motivos rápidos do "não se aplica" (com "Outro (escrever)") */
@@ -667,10 +691,11 @@ async function telaFoto(vid, n) {
   const minisDano = await Promise.all(danosAqui.map(d => BD.ler("fotos", `${vid}#D${d.dano}`)));
   $("#tela").innerHTML = `
     <div class="cartao">
-      <h3>${esc(r.legenda)}</h3>
+      <h3>${esc(nomeFoto(r))}</h3>
       <p><b>Onde ficar:</b> ${textoPosicao(r, L)}.</p>
       <p><b>Para onde apontar:</b> ${DIRECAO[r.direcao] || "—"}${r.elemento ? ` · elemento <b>${esc(r.elemento)}</b>` : ""}.</p>
       ${miniCroqui(o, o.roteiro, r, st)}
+      ${r.titulo ? `<p class="suave" style="margin-top:8px"><b>Legenda no relatório:</b> ${esc(r.legenda)}</p>` : ""}
     </div>
     <div id="gps"></div>
     ${foto ? `<div class="cartao"><img src="${url}" alt="Foto R${n}" style="width:100%;border-radius:8px">
@@ -933,7 +958,8 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     reativar: [],   // tipos marcados agora na foto que tinham sido removidos na avaliação do elemento
   };
   let avLocal = null;   // avaliação do elemento da foto (só para mostrar a seção 5; grava-se campo a campo)
-  let modo = (reg ? reg.posicao_marcada : !!r) ? "pronto" : "posicao";
+  let marcarFaltas = false;   // depois de tentar concluir com campo obrigatório vazio: campos vazios em vermelho
+  let modo =(reg ? reg.posicao_marcada : !!r) ? "pronto" : "posicao";
   // a legenda leva a localização dos danos (seção 5); o campo "Onde no elemento" saiu em 15/10/2026 (usuário) e
   // só as fotos antigas ainda o têm (f.onde), usado quando não há localização
   const ondeLegenda = () => {
@@ -992,7 +1018,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     .filter(([, es]) => es.length);
   const url = foto ? URL.createObjectURL(foto.blob) : null;
   $("#tela").innerHTML = `
-    ${r ? `<div class="cartao"><p class="suave">${extra ? "Foto extra junto à" : "Dano visto na"} foto do roteiro:</p><p><b>R${pad(r.n)}</b> · ${esc(r.legenda)}</p></div>` : ""}
+    ${r ? `<div class="cartao"><p class="suave">${extra ? "Foto extra junto à" : "Dano visto na"} foto do roteiro:</p><p><b>R${pad(r.n)}</b> · ${esc(nomeFoto(r))}</p></div>` : ""}
     <h2>1. Elemento${extra ? " (opcional)" : ""}</h2>
     ${sug.length ? `<div class="fichas" id="sug">${sug.map(e => `
       <label><input type="radio" name="sug" value="${ch(e)}" ${f.el === e ? "checked" : ""}><span>${esc(e.elemento)}${multiTramo ? ` · T${e.tramo}` : ""}</span></label>`).join("")}</div>
@@ -1076,21 +1102,23 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     if (!f.el || !f.danos.length) { caixa.innerHTML = `<p class="suave">Escolha o elemento e marque o dano para preencher quantidade, extensão e EC.</p>`; return; }
     const linhas = f.danos.map(t => avLocal?.danos.find(d => d.tipo === t)).filter(Boolean);
     const fora = f.danos.filter(t => !linhas.some(d => d.tipo === t));
-    caixa.innerHTML = `<p class="suave">Os mesmos campos da avaliação do ${esc(f.el.elemento)}: o que você preencher aqui aparece lá,
-        e pode ser completado depois. A nota do elemento fica na avaliação. A localização entra na legenda da foto.</p>`
+    const mf = marcarFaltas;
+    caixa.innerHTML = `<p class="suave">Os mesmos campos da avaliação do ${esc(f.el.elemento)}: o que você preencher aqui aparece lá.
+        Os campos com <span class="obrig">*</span> são obrigatórios. A nota do elemento fica na avaliação. A localização
+        entra na legenda da foto.</p>`
       + linhas.map(d => {
         const aq = alertaQuant(f.el, d);
         return `<div class="cartao" data-tipo="${esc(d.tipo)}">
           <div class="linha"><strong>${esc(d.tipo)}</strong>${(d.fotos || []).length > 1 ? `<span class="suave">também em outra(s) foto(s)</span>` : ""}</div>
-          <label class="campo"><span>Dano (descrição)</span><textarea data-campo="dano" rows="2">${esc(d.dano || "")}</textarea></label>
+          <label class="campo${classeFalta(mf, d.dano)}"><span>${rotuloCampo("Dano (descrição)", true)}</span><textarea data-campo="dano" rows="2">${esc(d.dano || "")}</textarea></label>
           <div style="display:grid;grid-template-columns:1fr 2fr;gap:8px">
-            <label class="campo" style="margin:0"><span>Quant.</span><input type="text" inputmode="decimal" data-campo="quant" value="${esc(d.quant ?? "")}"></label>
-            <label class="campo" style="margin:0"><span>Localização</span><input type="text" data-campo="localizacao" value="${esc(d.localizacao || "")}"></label>
+            <label class="campo${classeFalta(mf, d.quant)}" style="margin:0"><span>${rotuloCampo("Quant.", true)}</span><input type="text" inputmode="decimal" data-campo="quant" value="${esc(d.quant ?? "")}"></label>
+            <label class="campo${classeFalta(mf, d.localizacao)}" style="margin:0"><span>${rotuloCampo("Localização", true)}</span><input type="text" data-campo="localizacao" value="${esc(d.localizacao || "")}"></label>
           </div>
           ${aq ? `<p style="color:var(--alerta)">⚠ ${esc(aq)} — confira a quantidade.</p>` : ""}
-          <label class="campo"><span>Extensão relativa</span><select data-campo="extensao"><option value="">—</option>
+          <label class="campo${classeFalta(mf, d.extensao)}"><span>${rotuloCampo("Extensão relativa", true)}</span><select data-campo="extensao"><option value="">—</option>
             ${EXTENSOES.map(x => `<option ${d.extensao === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
-          <div class="campo"><span>Estado de condição (EC)</span><div class="ecs">${[4, 3, 2, 1].map(n =>
+          <div class="campo${classeFalta(mf, d.ec)}"><span>${rotuloCampo("Estado de condição (EC)", true)}</span><div class="ecs">${[4, 3, 2, 1].map(n =>
             `<button class="ec ${d.ec === n ? "marcada" : ""}" data-ec="${n}">${n} - ${ECS_NORMA[n]}</button>`).join("")}</div></div>
           <details ${d.insuficiencia || d.causa ? "open" : ""}><summary>Insuficiência estrutural e causa provável (opcional)</summary>
             <label class="campo"><span>Insuficiência estrutural</span><textarea data-campo="insuficiencia" rows="2">${esc(d.insuficiencia || "")}</textarea></label>
@@ -1104,9 +1132,11 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
       cartao.querySelectorAll("[data-campo]").forEach(c => {
         const campo = c.dataset.campo;
         const valor = () => campo === "quant" ? lerQuant(c.value) : (c.value.trim() || null);
-        if (c.tagName === "SELECT") c.onchange = () => alterarLinha(tipo, campo, c.value || null);
+        // campo vazio marcado em vermelho: sai do vermelho ao ser preenchido (sem redesenhar, para não perder o foco)
+        const marca = () => { if (marcarFaltas) c.closest(".campo")?.classList.toggle("falta", vazio(c.value)); };
+        if (c.tagName === "SELECT") c.onchange = () => { marca(); alterarLinha(tipo, campo, c.value || null); };
         else {
-          c.oninput = () => { const l = linha(); if (l) l[campo] = valor(); if (campo === "localizacao") desenharLegenda(); };
+          c.oninput = () => { marca(); const l = linha(); if (l) l[campo] = valor(); if (campo === "localizacao") desenharLegenda(); };
           // quantidade e localização mudam o aviso de quantidade (redesenha ao sair do campo); a localização também
           // muda a legenda, gravada na foto
           c.onchange = () => {
@@ -1237,6 +1267,22 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     if (extra ? !legendaAtual().trim() : !f.danos.length && !(f.editada && f.legenda.trim()))
       return avisar(extra ? "Escreva a legenda da foto." : "Marque o tipo de dano ou escreva a legenda.");
     await fila;
+    // campos obrigatórios da seção 5 (usuário, 27/10/2026): diz quais faltam; na foto dá para deixar para a avaliação
+    // do elemento, que só conclui com tudo preenchido
+    const faltas = extra ? [] : f.danos.map(t => avLocal?.danos.find(d => d.tipo === t)).filter(Boolean)
+      .map(d => [d.tipo, faltasDano(d)]).filter(([, fs]) => fs.length).map(([t, fs]) => `${t}: ${listaE(fs)}`);
+    if (faltas.length) {
+      const r5 = await janelaFaltas("Falta preencher na avaliação do dano", faltas,
+        ["Preencher agora", `Deixar para a avaliação do ${f.el.elemento}`]);
+      if (r5 === 0) {
+        marcarFaltas = true;
+        desenharAval();
+        const campo = document.querySelector("#aval .campo.falta");
+        campo?.scrollIntoView({ behavior: "smooth", block: "center" });
+        campo?.querySelector("input, textarea, select")?.focus({ preventScroll: true });
+        return;
+      }
+    }
     location.hash = voltar;
   };
   if ($("#excluir")) $("#excluir").onclick = async () => {
@@ -1351,6 +1397,35 @@ function alertasQuant(v, o) {
   return res;
 }
 
+/* campos obrigatórios de cada dano (usuário, 27/10/2026): ao concluir, o app diz qual ficou vazio — a ficha não sai
+ * com quantidade, extensão etc. em branco. Insuficiência e causa continuam opcionais (redigidas no escritório). */
+const OBRIGATORIOS = [["dano", "descrição"], ["quant", "quantidade"], ["localizacao", "localização"], ["extensao", "extensão"], ["ec", "EC"]];
+const vazio = x => x == null || (typeof x === "string" && !x.trim());
+const faltasDano = d => OBRIGATORIOS.filter(([c]) => vazio(d[c])).map(([, nome]) => nome);
+const listaE = xs => xs.length > 1 ? `${xs.slice(0, -1).join(", ")} e ${xs[xs.length - 1]}` : xs.join("");
+const rotuloDano = (d, j) => {
+  const t = (d.tipo || d.dano || "").trim();
+  return `Dano ${j + 1}${t ? ` (${t.length > 40 ? `${t.slice(0, 38)}…` : t})` : ""}`;
+};
+/* rótulo com "*" (campo obrigatório) e, depois de uma tentativa de concluir, a marca do campo vazio */
+const rotuloCampo = (texto, obrigatorio) => `${esc(texto)}${obrigatorio ? ` <span class="obrig">*</span>` : ""}`;
+const classeFalta = (marcar, valor) => marcar && vazio(valor) ? " falta" : "";
+/* o que falta para o elemento i ficar completo: nota, campos obrigatórios dos danos e, nos buzinotes, a quantidade
+ * existente (a do SGE vale até ser trocada) */
+function faltasElemento(o, i, a) {
+  const e = o.elementos[i], res = [];
+  if (a?.nota == null) res.push("nota do elemento");
+  (a?.danos || []).forEach((d, j) => {
+    const f = faltasDano(d);
+    if (f.length) res.push(`${rotuloDano(d, j)}: ${listaE(f)}`);
+  });
+  if (tipoElemento(e) === "drenagem" && (a?.existentes !== undefined ? a.existentes : e.quantidade ?? null) == null)
+    res.push("quantidade de buzinotes existentes");
+  return res;
+}
+const elementoCompleto = (v, o, i) => !faltasElemento(o, i, avaliacaoDe(v, o, i)).length;
+const nomeCurto = (o, nomes, i) => `${nomes[i].split(" – ")[0]}${o.tramos.length > 1 ? ` (tramo ${o.elementos[i].tramo})` : ""}`;
+
 async function telaAvaliacao(vid) {
   const v = await BD.ler("vistorias", vid);
   const o = v && oaeDe(v);
@@ -1358,10 +1433,13 @@ async function telaAvaliacao(vid) {
   cabecalho("Avaliação dos elementos", `${o.item}. ${o.nome}`, `#/vistoria/${enc(vid)}`);
   const nomes = nomesElementos(o);
   const avs = o.elementos.map((e, i) => avaliacaoDe(v, o, i));
-  const feitos = avs.filter(a => a?.nota != null).length;
+  // completo = nota e campos obrigatórios dos danos (0.7.9); com nota mas faltando dado, conta como pendente
+  const faltas = o.elementos.map((e, i) => faltasElemento(o, i, avs[i]));
+  const feitos = faltas.filter(f => !f.length).length;
+  const nFaltaDado = avs.filter((a, i) => a?.nota != null && faltas[i].length).length;
   const estr = o.elementos.map((e, i) => estrutural(e) ? avs[i]?.nota : null).filter(n => n != null);
   const final = estr.length ? Math.min(...estr) : null;
-  const prox = avs.findIndex(a => a?.nota == null);
+  const prox = faltas.findIndex(f => f.length);
   const lacunas = o.elementos.map((e, i) => i).filter(i => semNotaAnterior(o, i));
   let html = "", grupo = null;
   o.elementos.forEach((e, i) => {
@@ -1370,11 +1448,12 @@ async function telaAvaliacao(vid) {
     const a = avs[i], ant = o.anterior?.elementos?.[i], nf = fotosDoElemento(v, o, i).length, nd = a?.danos?.length || 0;
     html += `<a class="lista-item linha" href="#/elemento/${enc(vid)}/${i}" style="align-items:center">
       <span style="flex:1;min-width:0"><span class="nome" style="font-size:.92rem">${esc(nomes[i])}</span>
-        <span class="detalhe" style="display:block">${esc(e.regiao || "")} · ${a?.nota != null ? (nd ? `${nd} dano(s)` : "sem dano") : "a avaliar"}${nf ? ` · <b style="color:var(--erro)">${nf} foto(s) de dano</b>` : ""}${ant?.nota ? ` · anterior: nota ${ant.nota}` : semNotaAnterior(o, i) ? ` · <b style="color:var(--alerta)">sem nota na ficha anterior</b>` : ""}</span></span>
-      <span class="selo ${a?.nota != null ? (a.nota <= 2 ? "alerta" : "ok") : ""}">${a?.nota != null ? `nota ${a.nota}` : "›"}</span></a>`;
+        <span class="detalhe" style="display:block">${esc(e.regiao || "")} · ${a?.nota != null ? (nd ? `${nd} dano(s)` : "sem dano") : nd ? `${nd} dano(s), sem nota` : "a avaliar"}${nf ? ` · <b style="color:var(--erro)">${nf} foto(s) de dano</b>` : ""}${ant?.nota ? ` · anterior: nota ${ant.nota}` : semNotaAnterior(o, i) ? ` · <b style="color:var(--alerta)">sem nota na ficha anterior</b>` : ""}${a?.nota != null && faltas[i].length ? `<br><b style="color:var(--alerta)">Falta: ${esc(faltas[i].join("; "))}</b>` : ""}</span></span>
+      <span class="selo ${a?.nota != null ? (a.nota <= 2 || faltas[i].length ? "alerta" : "ok") : ""}">${a?.nota != null ? `nota ${a.nota}${faltas[i].length ? " · falta dado" : ""}` : "›"}</span></a>`;
   });
   $("#tela").innerHTML = `
-    <div class="cartao"><strong>${feitos} de ${o.elementos.length} elementos avaliados</strong>
+    <div class="cartao"><strong>${feitos} de ${o.elementos.length} elementos avaliados</strong>${nFaltaDado
+      ? ` <span style="color:var(--alerta)">· ${nFaltaDado} com nota, mas com dado faltando</span>` : ""}
       <div style="height:8px;background:#e5e9ef;border-radius:4px;margin-top:8px"><div style="height:8px;border-radius:4px;background:var(--ok);width:${Math.round(100 * feitos / o.elementos.length)}%"></div></div>
       <p style="margin-top:10px">${final != null ? `<b>Nota final sugerida: ${final} – ${NOTAS_NORMA[final][0]}</b> (menor nota entre os elementos estruturais avaliados — sem juntas, guarda-corpo/guarda-rodas, pavimento e buzinotes — Anexo C).`
         : "A nota final sugerida aparece quando houver elementos estruturais avaliados."}</p>
@@ -1443,13 +1522,15 @@ async function telaElemento(vid, i) {
   const origem = d => d.fotos?.length ? `das fotos ${d.fotos.map(k => nFoto(k) ? `F${pad(nFoto(k))}` : "(excluída)").join(", ")}`
     : d.origem === "anterior" ? "da vistoria anterior" : "sem foto";
   const quant = lerQuant;
+  let marcarFaltas = false;   // depois de tentar concluir com campo obrigatório vazio: campos vazios em vermelho
 
   const desenhar = () => {
     const sug = notaSugerida(av);
     const alertas = [];
+    const mf = marcarFaltas;
     av.danos.forEach((d, j) => {
-      if (d.ec == null) alertas.push(`Dano ${j + 1}: falta o EC.`);
-      if (!d.extensao) alertas.push(`Dano ${j + 1}: falta a extensão relativa.`);
+      const fs = faltasDano(d);
+      if (fs.length) alertas.push(`${rotuloDano(d, j)}: falta ${listaE(fs)}.`);
       const q = alertaQuant(e, d);
       if (q) alertas.push(`Dano ${j + 1}: ${q} — confira a quantidade.`);
     });
@@ -1461,6 +1542,9 @@ async function telaElemento(vid, i) {
     if (av.nota === 5 && av.danos.length) alertas.push("Nota 5 é sem danos (Anexo C), mas há danos registrados.");
     if (av.nota != null && av.nota < 5 && !av.danos.length)
       alertas.push(`Sem dano registrado e nota ${av.nota}: pela norma (Anexo C), elemento sem dano é nota 5.`);
+    // "Manter como na anterior": sem dano nesta vistoria, copia a nota e o dano; com dano, junta o da anterior como mais
+    // uma linha (uma vez) e não mexe no que já foi preenchido
+    const podeCopiar = !!ant && (av.danos.length ? !!ant.dano && !av.danos.some(d => d.origem === "anterior") : ant.nota != null || !!ant.dano);
     if (buzinote) {
       if (av.existentes == null) alertas.push("Informe a quantidade de buzinotes existentes.");
       if (av.danificados != null && av.existentes != null && av.danificados > av.existentes)
@@ -1476,12 +1560,14 @@ async function telaElemento(vid, i) {
           ${ant.dano ? `<p>${esc(ant.dano.dano)}</p><p class="suave">${[ant.dano.quant != null ? `quant. ${ant.dano.quant}` : "", ant.dano.localizacao,
             ant.dano.extensao, ant.dano.ec ? `EC ${ant.dano.ec} - ${ECS_NORMA[ant.dano.ec]}` : ""].filter(Boolean).map(esc).join(" · ")}</p>`
             : `<p class="suave">Sem dano registrado.${ant.nota != null && ant.nota < 5 ? ` A nota ${ant.nota} sem dano estava errada: pela norma, sem dano é nota 5.` : ""}</p>`}
-          ${ant.nota != null || ant.dano ? `<div class="botoes"><button id="copiar" class="botao secundario">Manter como na anterior</button></div>` : ""}`
+          ${podeCopiar ? `<div class="botoes"><button id="copiar" class="botao secundario">${av.danos.length
+            ? "Juntar o dano da anterior aos desta vistoria" : "Manter como na anterior"}</button></div>`
+            : ant.dano && av.danos.some(d => d.origem === "anterior") ? `<p class="suave">O dano da anterior já está entre os desta vistoria.</p>` : ""}`
           : `<p class="suave">${e.novo_desde ? "Elemento novo: separado a partir desta vistoria (antes ficava dentro da laje)." : "Este elemento não está na ficha anterior."}</p>`}
       </div>
       ${buzinote ? `<div class="cartao"><h3>Quantidade de buzinotes</h3>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-          <label class="campo" style="margin:0"><span>Existentes${e.quantidade ? ` (SGE: ${e.quantidade})` : ""}</span>
+          <label class="campo${classeFalta(mf, av.existentes)}" style="margin:0"><span>${rotuloCampo(`Existentes${e.quantidade ? ` (SGE: ${e.quantidade})` : ""}`, true)}</span>
             <input id="bz-exist" type="text" inputmode="numeric" value="${esc(av.existentes ?? "")}"></label>
           <label class="campo" style="margin:0"><span>Danificados</span>
             <input id="bz-dan" type="text" inputmode="numeric" value="${esc(av.danificados ?? "")}"></label>
@@ -1490,17 +1576,18 @@ async function telaElemento(vid, i) {
       ${fotos.length ? `<div class="miniaturas">${fotos.map((f, j) => `<a href="#/dano/${enc(vid)}/${f.dano}/-/${i}"><img src="${minis[j]?.miniatura || ""}" alt="F${pad(f.n)}"><span>F${pad(f.n)}</span></a>`).join("")}</div>` : `<p class="suave">Nenhuma foto de dano deste elemento.</p>`}
       <div class="botoes"><a class="botao secundario" href="#/dano/${enc(vid)}/novo/-/${i}">+ Foto de dano deste elemento</a></div>
       <h2>Danos nesta vistoria</h2>
+      ${av.danos.length ? `<p class="suave">Os campos com <span class="obrig">*</span> são obrigatórios.</p>` : ""}
       ${av.danos.map((d, j) => `
         <div class="cartao" data-j="${j}">
           <div class="linha"><strong>Dano ${j + 1}</strong><span class="suave">${esc(origem(d))}</span></div>
-          <label class="campo"><span>Dano</span><textarea data-campo="dano" rows="2">${esc(d.dano || "")}</textarea></label>
+          <label class="campo${classeFalta(mf, d.dano)}"><span>${rotuloCampo("Dano", true)}</span><textarea data-campo="dano" rows="2">${esc(d.dano || "")}</textarea></label>
           <div style="display:grid;grid-template-columns:1fr 2fr;gap:8px">
-            <label class="campo" style="margin:0"><span>Quant.</span><input type="text" inputmode="decimal" data-campo="quant" value="${esc(d.quant ?? "")}"></label>
-            <label class="campo" style="margin:0"><span>Localização</span><input type="text" data-campo="localizacao" value="${esc(d.localizacao || "")}"></label>
+            <label class="campo${classeFalta(mf, d.quant)}" style="margin:0"><span>${rotuloCampo("Quant.", true)}</span><input type="text" inputmode="decimal" data-campo="quant" value="${esc(d.quant ?? "")}"></label>
+            <label class="campo${classeFalta(mf, d.localizacao)}" style="margin:0"><span>${rotuloCampo("Localização", true)}</span><input type="text" data-campo="localizacao" value="${esc(d.localizacao || "")}"></label>
           </div>
-          <label class="campo"><span>Extensão relativa</span><select data-campo="extensao"><option value="">—</option>
+          <label class="campo${classeFalta(mf, d.extensao)}"><span>${rotuloCampo("Extensão relativa", true)}</span><select data-campo="extensao"><option value="">—</option>
             ${EXTENSOES.map(x => `<option ${d.extensao === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
-          <div class="campo"><span>Estado de condição (EC)</span><div class="ecs">${[4, 3, 2, 1].map(n =>
+          <div class="campo${classeFalta(mf, d.ec)}"><span>${rotuloCampo("Estado de condição (EC)", true)}</span><div class="ecs">${[4, 3, 2, 1].map(n =>
             `<button class="ec ${d.ec === n ? "marcada" : ""}" data-ec="${n}">${n} - ${ECS_NORMA[n]}</button>`).join("")}</div></div>
           <details ${d.insuficiencia || d.causa ? "open" : ""}><summary>Insuficiência estrutural e causa provável (opcional)</summary>
             <label class="campo"><span>Insuficiência estrutural</span><textarea data-campo="insuficiencia" rows="2">${esc(d.insuficiencia || "")}</textarea></label>
@@ -1509,10 +1596,10 @@ async function telaElemento(vid, i) {
           <button class="botao perigo" data-remover="${j}" style="min-height:40px;margin-top:6px">Remover este dano</button>
         </div>`).join("") || `<div class="vazio">Nenhum dano registrado neste elemento.</div>`}
       <div class="opcoes"><button id="add-dano" class="botao secundario">+ Dano sem foto</button><button id="sem-dano" class="botao secundario">Sem dano</button></div>
-      <h2>Nota do elemento</h2>
+      <h2>Nota do elemento <span class="obrig">*</span></h2>
       <p class="suave">${sug != null ? `Sugerida: <b>${sug} – ${NOTAS_NORMA[sug][0]}</b> ${av.danos.length ? "(menor EC dos danos, no máximo 4)" : "(sem dano)"}.`
         : "Preencha o EC dos danos para ver a nota sugerida."}</p>
-      <div class="notas">${[5, 4, 3, 2, 1].map(n => `<button class="nota ${av.nota === n ? "marcada" : ""}" data-nota="${n}"><b>${n}</b><span>${NOTAS_NORMA[n][0]}</span></button>`).join("")}</div>
+      <div class="notas${mf && av.nota == null ? " falta" : ""}">${[5, 4, 3, 2, 1].map(n => `<button class="nota ${av.nota === n ? "marcada" : ""}" data-nota="${n}"><b>${n}</b><span>${NOTAS_NORMA[n][0]}</span></button>`).join("")}</div>
       <p class="suave" style="margin-top:8px">${av.nota != null ? `<b>${av.nota} – ${NOTAS_NORMA[av.nota][0]}:</b> ${NOTAS_NORMA[av.nota][1]}` : "Toque na nota (Anexo C da DNIT 010/2024-PRO)."}</p>
       ${alertas.length ? `<div class="cartao" style="border-color:var(--alerta)">${alertas.map(t => `<p>⚠ ${esc(t)}</p>`).join("")}</div>` : ""}
       <div class="botoes">
@@ -1526,7 +1613,11 @@ async function telaElemento(vid, i) {
         const campo = c.dataset.campo;
         if (c.tagName === "SELECT") c.onchange = () => { d[campo] = c.value || null; salvar(); desenhar(); };
         else {
-          c.oninput = () => { d[campo] = campo === "quant" ? quant(c.value) : (c.value.trim() || null); };
+          c.oninput = () => {
+            d[campo] = campo === "quant" ? quant(c.value) : (c.value.trim() || null);
+            // campo vazio marcado em vermelho: sai do vermelho ao ser preenchido (sem redesenhar, para não perder o foco)
+            if (marcarFaltas) c.closest(".campo")?.classList.toggle("falta", vazio(d[campo]));
+          };
           // quantidade e localização mudam os avisos (item 8): redesenha ao sair do campo
           c.onchange = ["quant", "localizacao"].includes(campo) ? () => { salvar(); desenhar(); } : salvar;
         }
@@ -1562,23 +1653,39 @@ async function telaElemento(vid, i) {
     };
     document.querySelectorAll("[data-nota]").forEach(b => { b.onclick = () => { av.nota = Number(b.dataset.nota); salvar(); desenhar(); }; });
     if ($("#copiar")) $("#copiar").onclick = () => {
-      if ((av.danos.length || av.nota != null) && !confirm("Substituir o que já foi preenchido pelo que estava na vistoria anterior?")) return;
+      // com dano já registrado nesta vistoria, junta: o dano da anterior entra como mais uma linha e o que foi preenchido
+      // fica (até a 0.7.8 o botão trocava tudo e as linhas das fotos voltavam sem quantidade e extensão — campo,
+      // 27/10/2026)
+      if (av.danos.length) {
+        av.danos.push({ ...ant.dano, fotos: [], origem: "anterior" });
+        salvar(); desenhar();
+        document.querySelector(`[data-j="${av.danos.length - 1}"]`)?.scrollIntoView({ behavior: "smooth" });
+        return avisar("Dano da anterior juntado aos desta vistoria; o que já estava preenchido ficou. Se for o mesmo dano de "
+          + "uma foto, complete a linha da foto e remova a da anterior.", 7000);
+      }
+      if (av.nota != null && !confirm(`Trocar a nota ${av.nota} pela da vistoria anterior?`)) return;
       // sem dano na anterior: nota 5 pela norma (as fichas anteriores davam 4 a elemento sem dano — usuário, 02/10/2026)
       av.nota = ant.dano ? ant.nota : 5;
       av.danos = ant.dano ? [{ ...ant.dano, fotos: [], origem: "anterior" }] : [];
-      av.descartados = [];
-      mesclarFotos();
       salvar(); desenhar();
       avisar(!ant.dano && ant.nota !== 5 ? `Sem dano na anterior: nota 5, pela norma (a anterior tinha ${ant.nota ?? "sem nota"}).`
         : "Copiado da vistoria anterior. Confira e ajuste o que mudou.", 4000);
     };
     $("#concluir").onclick = async () => {
-      if (av.nota == null) return avisar("Escolha a nota do elemento.");
-      if (av.danos.some(d => !d.dano)) return avisar("Descreva o dano (ou remova a linha vazia).");
-      if (av.danos.some(d => d.ec == null || !d.extensao) && !confirm("Há dano sem EC ou sem extensão. Concluir assim mesmo (completar depois)?")) return;
+      // campos obrigatórios (usuário, 27/10/2026): não conclui e diz qual falta; os vazios ficam em vermelho
+      const faltas = faltasElemento(o, i, av);
+      if (faltas.length) {
+        await janelaFaltas(`Falta preencher no ${nomes[i].split(" – ")[0]}`, faltas);
+        marcarFaltas = true;
+        desenhar();
+        const campo = document.querySelector(".campo.falta, .notas.falta");
+        campo?.scrollIntoView({ behavior: "smooth", block: "center" });
+        campo?.querySelector?.("input, textarea, select")?.focus({ preventScroll: true });
+        return;
+      }
       await salvar();
       const vv = await BD.ler("vistorias", vid);
-      const falta = j => avaliacaoDe(vv, o, j)?.nota == null;
+      const falta = j => !elementoCompleto(vv, o, j);
       const prox = o.elementos.findIndex((x, j) => j > i && falta(j));
       const primeiro = o.elementos.findIndex((x, j) => falta(j));
       location.hash = prox >= 0 ? `#/elemento/${enc(vid)}/${prox}` : primeiro >= 0 ? `#/elemento/${enc(vid)}/${primeiro}` : `#/avaliacao/${enc(vid)}`;
@@ -1763,15 +1870,20 @@ const horaLocal = iso => new Date(iso).toLocaleString("pt-BR", { dateStyle: "sho
 function conferencia(v, o) {
   const st = v.roteiro_status || {};
   const itens = [];
-  const add = (ok, texto) => itens.push({ ok, texto });
+  const add = (ok, texto, lista = []) => itens.push({ ok, texto, lista });
   const pend = o.roteiro.filter(r => !st[r.n]);
   add(!pend.length, pend.length ? `Roteiro: ${pend.length} foto(s) pendente(s) (${pend.slice(0, 6).map(r => `R${pad(r.n)}`).join(", ")}${pend.length > 6 ? "…" : ""})` : "Roteiro completo");
   const inc = v.fotos.filter(f => f.dano && !danoCompleto(f));
   add(!inc.length, inc.length ? `Fotos de dano/extras com dado faltando: ${inc.map(f => `F${pad(f.n)}`).join(", ")}` : "Fotos de dano e extras completas");
   const naoAv = o.elementos.filter((e, i) => avaliacaoDe(v, o, i)?.nota == null);
   add(!naoAv.length, naoAv.length ? `Avaliação: ${naoAv.length} de ${o.elementos.length} elemento(s) sem nota` : "Todos os elementos avaliados");
-  const semEc = v.avaliacao.reduce((n, a) => n + (a.danos || []).filter(d => d.ec == null || !d.extensao).length, 0);
-  add(!semEc, semEc ? `${semEc} dano(s) sem EC ou sem extensão` : "Danos com EC e extensão");
+  // campos obrigatórios (0.7.9): elemento por elemento, o que falta (os sem nota já estão na linha de cima)
+  const nomesC = nomesElementos(o);
+  const faltando = o.elementos.map((e, i) => [i, faltasElemento(o, i, avaliacaoDe(v, o, i)).filter(t => t !== "nota do elemento")])
+    .filter(([, fs]) => fs.length);
+  add(!faltando.length, faltando.length ? `Falta preencher campo obrigatório em ${faltando.length} elemento(s):`
+    : "Danos com todos os campos obrigatórios (quantidade, localização, extensão e EC)",
+    faltando.map(([i, fs]) => `${nomeCurto(o, nomesC, i)} – ${fs.join("; ")}`));
   const semGps = v.fotos.filter(f => f.lat == null);
   add(!semGps.length, semGps.length ? `${semGps.length} foto(s) sem GPS: ${semGps.slice(0, 8).map(f => `F${pad(f.n)}`).join(", ")}` : "Todas as fotos com GPS");
   // fotos longe da OAE (no teste de 02/10/2026, fotos a 234 km só foram percebidas no computador)
@@ -1805,7 +1917,8 @@ async function telaExportar(vid) {
   const nomeZip = `vistoria_${v.oae}_${v.data}.zip`;
   $("#tela").innerHTML = `
     <div class="cartao"><h3>Conferência</h3>
-      ${conf.map(c => `<p>${c.ok ? "✅" : "⚠️"} ${esc(c.texto)}</p>`).join("")}
+      ${conf.map(c => `<p>${c.ok ? "✅" : "⚠️"} ${esc(c.texto)}</p>${c.lista.length
+        ? `<ul class="faltas">${c.lista.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}`).join("")}
       <p class="suave">Pode exportar mesmo com pendências (por exemplo, como cópia de segurança no meio da vistoria).</p></div>
     <div class="cartao"><h3>Arquivo</h3>
       <p><b>${esc(nomeZip)}</b></p>
