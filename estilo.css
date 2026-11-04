@@ -147,3 +147,36 @@ details summary { cursor: pointer; color: var(--azul); font-weight: 600; margin:
 .campo.falta .ecs, .notas.falta { outline: 2px solid var(--erro); outline-offset: 3px; border-radius: 10px; }
 .faltas { margin: 6px 0 4px; padding-left: 20px; }
 .faltas li { margin: 4px 0; }
+/* Cartilha de Bolso (0.8.0): lista de danos do elemento com o 📖 ao lado, critério embaixo de cada EC e página da
+   Cartilha em tela cheia (tocar na imagem amplia) */
+.lista-linha { display: flex; gap: 6px; margin-bottom: 8px; }
+.lista-linha .lista-item { margin-bottom: 0; flex: 1; min-width: 0; }
+.lista-item.marcada { border: 2px solid var(--erro); background: #fdecea; padding: 11px 13px; }
+.lista-item.marcada .nome { color: var(--erro); }
+.lista-item .faixa { float: right; margin-left: 8px; }
+.lista-linha .ver { flex: none; width: 62px; border: 1px solid var(--borda); border-radius: var(--raio); background: var(--cartao);
+  color: var(--azul); font: inherit; font-size: .78rem; font-weight: 600; line-height: 1.25; cursor: pointer; }
+.lista-linha .ver:active { background: #e8eef6; }
+.ver-mini { border: 1px solid var(--azul); border-radius: 999px; background: #fff; color: var(--azul); font: inherit;
+  font-size: .82rem; font-weight: 600; padding: 1px 9px; margin-left: 4px; cursor: pointer; }
+.botao.ver-cartilha { min-height: 44px; font-size: .92rem; margin: 10px 0 2px; }
+.ecs.criterios { grid-template-columns: 1fr; }
+.ecs.criterios .ec { align-items: flex-start; text-align: left; padding: 8px 12px; }
+.ec small { display: block; font-weight: 400; font-size: .82rem; color: var(--suave); margin-top: 2px; }
+.ecs .ec.fora { opacity: .5; border-style: dashed; }
+.ecs .ec.fora.marcada { opacity: .85; }
+.ec.marcada small { color: var(--azul); }
+.cartilha-tela { position: fixed; inset: 0; z-index: 40; background: #1b1f24; display: flex; flex-direction: column; }
+.cartilha-tela .barra { display: flex; align-items: center; gap: 8px; color: #fff;
+  padding: 8px 10px; padding-top: calc(8px + env(safe-area-inset-top)); }
+.cartilha-tela .barra b { flex: 1; font-size: .92rem; line-height: 1.25; }
+.cartilha-tela .barra small { display: block; font-weight: 400; color: #c9d1da; }
+.cartilha-tela .barra button { flex: none; min-width: 44px; min-height: 44px; border: 0; border-radius: 10px;
+  background: rgba(255,255,255,.16); color: #fff; font: inherit; font-size: 1.15rem; font-weight: 700; cursor: pointer; }
+.cartilha-tela .barra button[disabled] { opacity: .3; cursor: default; }
+.cartilha-tela .pagina { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; background: #fff; }
+.cartilha-tela img { display: block; width: 100%; max-width: 900px; height: auto; margin: 0 auto; cursor: zoom-in; }
+.cartilha-tela.ampliada img { width: 220%; max-width: 1980px; cursor: zoom-out; }
+.cartilha-tela .falta { padding: 40px 16px; text-align: center; color: var(--suave); }
+.cartilha-tela .dica { color: #c9d1da; font-size: .8rem; text-align: center;
+  padding: 6px; padding-bottom: calc(6px + env(safe-area-inset-bottom)); }

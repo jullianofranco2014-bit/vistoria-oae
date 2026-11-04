@@ -7,10 +7,11 @@
  * Parte 3: fotos de dano — vinculadas a um elemento, com posição e direção marcadas no croqui; tiradas da
  *          própria foto do roteiro ("+ Dano aqui") ou avulsas. No relatório, cada foto de dano vem logo depois
  *          da foto do roteiro em que foi tirada; as avulsas vão para o fim.
+ * Cartilha (0.8.0): danos e EC pela Cartilha de Bolso do IPR, com a página do dano em tela cheia (📖), também sem sinal.
  */
 "use strict";
 
-const VERSAO_APP = "0.7.10";
+const VERSAO_APP = "0.8.0";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -188,6 +189,7 @@ async function instalarPacote(p) {
   }
   await BD.gravar("chaves", p, "pacote");
   await carregarPacote();
+  baixarCartilha().catch(e => console.warn("cartilha:", e));   // pacote com a Cartilha: as páginas dela, para o 📖
   avisar(`${nomeUnidade(nova)}: ${p.oaes.length} OAEs carregadas (pacote de ${p.gerado_em}).`);
 }
 
@@ -243,6 +245,7 @@ function telaDados(primeiroUso) {
       pelo <code>exportar_app.py</code>. Depois disso o app funciona sem internet.</p></div>` : ""}
     ${p ? `<div class="cartao"><h3>Pacote atual</h3>
       <p><b>${esc(nomeUnidade(Estado.ul))}</b> · ${p.oaes.length} OAEs · gerado em ${esc(p.gerado_em)}</p>
+      ${p.cartilha ? `<p class="suave" id="cartilha-status">Cartilha de Bolso: conferindo as páginas no aparelho…</p>` : ""}
       <p class="suave">Carregar um pacote novo substitui os dados das OAEs. As vistorias já feitas não são apagadas;
       as de outra UL ficam guardadas e abrem quando o pacote dela for carregado.</p></div>` : ""}
     <div class="botoes">
@@ -251,6 +254,13 @@ function telaDados(primeiroUso) {
       ${/^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? `<button id="servidor" class="botao secundario">Carregar do servidor</button>` : ""}
     </div>
     ${primeiroUso ? `<p class="suave">Para levar o arquivo ao celular: WhatsApp, Google Drive ou cabo USB. No celular ele costuma ficar na pasta Downloads.</p>` : ""}`;
+  // páginas da Cartilha no aparelho: quantas já estão e, depois de baixar as que faltam, de novo
+  const st = $("#cartilha-status");
+  if (st) (async () => {
+    if ("caches" in window) st.textContent = textoCartilha(PAGINAS_CARTILHA.length - (await faltamCartilha(await caches.open(CACHE_CARTILHA))).length);
+    const n = await baixarCartilha();
+    if (document.body.contains(st)) st.textContent = textoCartilha(n);
+  })().catch(e => console.warn("cartilha:", e));
   $("#arquivo").onchange = async ev => {
     const f = ev.target.files[0];
     if (!f) return;
@@ -796,9 +806,304 @@ async function telaFoto(vid, n) {
   };
 }
 
+/* ---------- Cartilha de Bolso do IPR (0.8.0) ----------
+ * Danos e EC pela Cartilha de Bolso de Inspeção de Pontes (regra cartilha-ec-dos-danos, 03/11/2026). Os dados vêm no
+ * pacote (exportar_app.py, cartilha.para_app) e a lógica é a do cartilha.py, com as mesmas regex sobre o texto sem
+ * acento: o importar_vistoria.py e o checar_fichas.py conferem igual no escritório. EC que não combina com a Cartilha:
+ * o app só avisa, não impede (usuário, 04/11/2026). Pacote sem a Cartilha (kit das outras ULs ainda sem o cartilha.py):
+ * ficam a lista de antes (DANOS_POR_TIPO) e os botões de EC sem critério. */
+const cartilha = () => Estado.pacote?.cartilha || null;
+const _regexCartilha = {};
+const cartilhaRe = p => _regexCartilha[p] || (_regexCartilha[p] = new RegExp(p));
+const cartilhaNormal = t => String(t ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+
+/* danos da Cartilha reconhecidos no texto, pelo tipo e pela descrição do elemento (cartilha.achar) */
+function cartilhaAchar(texto, el) {
+  const C = cartilha();
+  if (!C) return [];
+  const tipo = tipoElemento(el), t = cartilhaNormal(texto), d = cartilhaNormal(el.detalhe);
+  return C.danos.filter(x => (cartilhaRe(x.termo).test(t) || (x.ou_tipos || []).includes(tipo))
+    && (!x.tipos || x.tipos.includes(tipo))
+    && (!x.desc || cartilhaRe(x.desc).test(d))
+    && !(x.nao_desc && cartilhaRe(x.nao_desc).test(d)));
+}
+/* EC que a Cartilha admite para o dano: os que têm critério, sem os que só valem para elemento complementar (no
+ * estrutural) e cortados pela extensão nos danos medidos em % da superfície (cartilha.ecs_possiveis) */
+function cartilhaEcs(x, extensao, el) {
+  let ecs = [1, 2, 3, 4].filter(n => x.ec[n]);
+  const corta = l => { const r = ecs.filter(n => l.includes(n)); if (r.length) ecs = r; };
+  if (estrutural(el) && x.so_complementar) corta([1, 2, 3, 4].filter(n => !x.so_complementar.includes(n)));
+  const porExtensao = cartilha().ec_por_extensao[extensao];
+  if (x.por_extensao && porExtensao) corta(porExtensao);
+  return ecs;
+}
+function cartilhaFaixa(ecs) {
+  ecs = [...ecs].sort((a, b) => a - b);
+  if (ecs.length === 1) return `EC ${ecs[0]} (${ECS_NORMA[ecs[0]]})`;
+  return ecs.every((n, i) => n === ecs[0] + i) ? `EC ${ecs[0]} a ${ecs[ecs.length - 1]}` : `EC ${ecs.join(" ou ")}`;
+}
+// no campo, sem termo de escritório (usuário, 04/11/2026): a página fica no 📖 e o critério da equipe é "o critério adotado"
+const cartilhaOrigem = x => x.criterio === "equipe" ? "o critério adotado" : "a Cartilha";
+// o mesmo nas observações e nos avisos, que o cartilha.py escreve para o escritório
+const cartilhaCampo = t => String(t ?? "").replace(/\b([Cc])ritério da equipe/g, "$1ritério adotado").replace(/\b([Ll])eitura da equipe/g, "$1eitura adotada");
+
+/* entre os danos reconhecidos no texto, o mais restrito (o de menor EC máximo; cartilha.conferir): [dano, EC dele] */
+function cartilhaMaisRestrito(es, extensao, el) {
+  let [te, tecs] = [es[0], cartilhaEcs(es[0], extensao, el)];
+  for (const x of es.slice(1)) {
+    const p = cartilhaEcs(x, extensao, el);
+    if (Math.max(...p) < Math.max(...tecs)) [te, tecs] = [x, p];
+  }
+  return [te, tecs];
+}
+/* EC melhor (número maior) que o maior EC que a Cartilha admite para o dano: o aviso; senão null. Com mais de um dano
+ * reconhecido no texto, vale o mais restrito (cartilha.conferir) */
+function cartilhaConferir(texto, ec, extensao, el) {
+  if (ec == null) return null;
+  const es = cartilhaAchar(texto, el);
+  if (!es.length) return null;
+  const [te, tecs] = cartilhaMaisRestrito(es, extensao, el);
+  if (ec <= Math.max(...tecs)) return null;
+  let ext = te.por_extensao && cartilha().ec_por_extensao[extensao] ? ` com extensão ${extensao}` : "";
+  if (estrutural(el) && te.so_complementar) ext = " em elemento estrutural";
+  return `EC ${ec}, mas ${cartilhaOrigem(te)} põe "${te.nome}"${ext} em ${cartilhaFaixa(tecs)}`;
+}
+/* partes do texto que não são dano ou não usam o nome do dano da Cartilha: os avisos (cartilha.nao_e_dano) */
+function cartilhaNaoDano(texto, el) {
+  const C = cartilha();
+  if (!C) return [];
+  const tipo = tipoElemento(el), t = cartilhaNormal(texto);
+  const out = C.nao_dano.filter(n => n.todo && cartilhaRe(n.termo).test(t) && (!n.tipos || n.tipos.includes(tipo)));
+  // a barra não separa: "drenos obstruídos/danificados" é um dano só
+  for (let parte of t.split(/[,;]| e /)) {
+    parte = parte.replace(/^[ .]+|[ .]+$/g, "");
+    if (!parte || cartilhaAchar(parte, el).length) continue;
+    const n = C.nao_dano.find(n => !n.todo && cartilhaRe(n.termo).test(parte) && (!n.tipos || n.tipos.includes(tipo)));
+    if (n && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+/* danos da Cartilha oferecidos na lista do app para o elemento, na ordem da lista (cartilha.lista) */
+function cartilhaLista(el) {
+  const C = cartilha();
+  if (!C) return [];
+  const tipo = tipoElemento(el), d = cartilhaNormal(el.detalhe);
+  const porId = Object.fromEntries(C.danos.map(x => [x.id, x]));
+  return (C.lista[tipo] || []).map(i => porId[i]).filter(x => x
+    && !(x.tipos && !x.tipos.includes(tipo) && !(x.ou_tipos || []).includes(tipo))
+    && ![x.desc, C.lista_desc[x.id]].some(f => f && !cartilhaRe(f).test(d))
+    && ![x.nao_desc, C.lista_nao_desc[x.id]].some(f => f && cartilhaRe(f).test(d)));
+}
+/* texto que não é dano (sujidade, vegetação, desgaste sem perda…): o app avisa e ele não conta para a nota sugerida.
+ * Dano escrito sem o nome da Cartilha ("armadura exposta", "danificado"; dano=True no cartilha.py) também é avisado,
+ * mas conta. */
+function cartilhaNaoConta(d, el) {
+  const t = d.dano || d.tipo || "", ns = cartilhaNaoDano(t, el);
+  return ns.length > 0 && !ns.some(n => n.dano) && !cartilhaAchar(t, el).length;
+}
+/* a Cartilha numa linha de dano: o dano dela (entre os reconhecidos no texto, o escolhido na lista, que dá o nome à
+ * linha; escrito à mão, o mais restrito, o mesmo do aviso), os EC que ela admite e o único aviso que vale — EC fora da
+ * Cartilha, senão texto que não é dano, senão dano fora da Cartilha (usuário, 04/11/2026: uma mensagem só, e só quando
+ * algo pede atenção) */
+function cartilhaDoDano(d, el) {
+  if (!cartilha()) return null;
+  const texto = d.dano || d.tipo || "";
+  const es = cartilhaAchar(texto, el), ns = cartilhaNaoDano(texto, el);
+  const x = es.find(y => y.nome === d.tipo) || (es.length ? cartilhaMaisRestrito(es, d.extensao, el)[0] : null);
+  const conf = cartilhaConferir(texto, d.ec, d.extensao, el);
+  return {
+    x, ecs: x ? cartilhaEcs(x, d.extensao, el) : [1, 2, 3, 4],
+    pedeExtensao: !!(x?.por_extensao && !d.extensao),   // o EC sai da extensão: ela vem antes
+    aviso: conf ? `⚠ ${conf}` : ns.length ? `⚠ ${cartilhaCampo(ns[0].aviso)}` : null,
+    fora: !x && !!texto.trim(),
+  };
+}
+
+/* campo do EC de uma linha de dano (avaliação do elemento e seção 5 da foto de dano). Com a Cartilha: o pedido da
+ * extensão quando o EC depende dela, o 📖, o critério embaixo de cada botão (apagados, mas marcáveis, os EC que ela
+ * não admite), as observações em "Mais detalhes" e o aviso. */
+function htmlEC(d, el, mf) {
+  const c = cartilhaDoDano(d, el), x = c?.x;
+  return `${c?.pedeExtensao ? `<p style="color:var(--alerta);margin:4px 0 0">Escolha a extensão: o EC deste dano depende dela.</p>` : ""}
+    ${x?.pag ? `<button class="botao secundario ver-cartilha" data-ver="${x.id}">📖 Ver na Cartilha (${esc(rotuloPaginas(x))}): fotos de cada EC</button>` : ""}
+    <div class="campo${classeFalta(mf, d.ec)}"><span>${rotuloCampo("Estado de condição (EC)", true)}</span><div class="ecs${x ? " criterios" : ""}">${[4, 3, 2, 1].map(n =>
+      `<button class="ec${d.ec === n ? " marcada" : ""}${x && !c.ecs.includes(n) ? " fora" : ""}" data-ec="${n}">${n} - ${ECS_NORMA[n]}${x
+        ? `<small>${esc(x.ec[n] || "Não previsto na Cartilha.")}</small>` : ""}</button>`).join("")}</div></div>
+    ${x?.obs ? `<details><summary>Mais detalhes</summary><p class="suave">${esc(cartilhaCampo(x.obs))}</p></details>` : ""}
+    ${c?.aviso ? `<p style="color:var(--alerta)">${esc(c.aviso)}</p>`
+      : c?.fora ? `<p class="suave">Fora da Cartilha: o app aceita o texto, mas não confere o EC.</p>` : ""}`;
+}
+
+/* um dano da lista da Cartilha: o nome, o selo quando a Cartilha limita o EC ("só EC 1", "EC 1 a 3"), a marca "na
+ * vistoria anterior" e o 📖 com a página. `marcado` (foto de dano): true/false; na janela do dano sem foto, null. */
+function itemCartilha(x, el, marcado) {
+  const ecs = cartilhaEcs(x, null, el), naAnterior = (el.cartilha?.anterior || []).includes(x.id);
+  return `<div class="lista-linha"><button class="lista-item${marcado ? " marcada" : ""}" data-dano="${esc(x.nome)}"${marcado != null
+      ? ` aria-pressed="${marcado}"` : ""}>${ecs.length < 4 ? `<span class="selo faixa">${ecs.length === 1 ? `só EC ${ecs[0]}` : esc(cartilhaFaixa(ecs))}</span>` : ""}<span
+      class="nome">${marcado ? "✓ " : ""}${esc(x.nome)}</span>${naAnterior ? `<br><span class="detalhe"><b style="color:var(--azul)">na vistoria anterior</b></span>` : ""}</button>${x.pag
+      ? `<button class="ver" data-ver="${x.id}" aria-label="Ver ${esc(x.nome)} na Cartilha">📖<br>${esc(rotuloPaginas(x))}</button>` : ""}</div>`;
+}
+/* dano marcado na foto que não está na lista do elemento: texto escrito à mão ou nome de antes da 0.8.0 */
+function itemAvulso(t, el) {
+  const es = el ? cartilhaAchar(t, el) : [], x = es.length ? cartilhaMaisRestrito(es, null, el)[0] : null;
+  const ns = el && !x ? cartilhaNaoDano(t, el) : [];
+  const det = !el ? "" : x ? `na Cartilha: ${x.nome}` : ns.some(n => n.dano) ? "sem o nome do dano da Cartilha"
+    : ns.length ? "não é dano da Cartilha" : "fora da Cartilha";
+  return `<div class="lista-linha"><button class="lista-item marcada" data-dano="${esc(t)}" aria-pressed="true"><span class="nome">✓ ${esc(t)}</span>${det
+      ? `<br><span class="detalhe">${esc(det)}</span>` : ""}</button>${x?.pag
+      ? `<button class="ver" data-ver="${x.id}" aria-label="Ver ${esc(x.nome)} na Cartilha">📖<br>${esc(rotuloPaginas(x))}</button>` : ""}</div>`;
+}
+/* lista de danos da Cartilha do elemento (usuário, 04/11/2026: a tela do dano não pode ficar grande): os principais —
+ * os da vistoria anterior e os mais comuns na família, do exportar_app.py (cartilha.principais) — e os demais em "Ver
+ * mais", com o número dos escondidos. Na foto de dano, `marcados` são os nomes marcados: ficam sempre à vista, e os de
+ * fora da lista vêm primeiro. */
+function htmlListaCartilha(el, verMais, marcados = null) {
+  const ls = cartilhaLista(el), m = marcados || [];
+  const ids = el.cartilha?.principais || ls.map(x => x.id);
+  const principais = ids.map(i => ls.find(x => x.id === i)).filter(Boolean), outros = ls.filter(x => !ids.includes(x.id));
+  const marca = x => marcados ? m.includes(x.nome) : null;
+  const escondidos = outros.filter(x => !m.includes(x.nome));
+  const topo = verMais ? principais : [...principais, ...outros.filter(x => m.includes(x.nome))];
+  return `<p class="suave">${outros.length ? "Principais danos deste elemento: os da vistoria anterior e os mais comuns nesta família. " : ""}${
+      marcados ? "Toque para marcar (pode ser mais de um)" : "Toque no dano para registrar"}; 📖 mostra a página da Cartilha com as fotos de cada EC.</p>`
+    + m.filter(t => !ls.some(x => x.nome === t)).map(t => itemAvulso(t, el)).join("")
+    + (topo.map(x => itemCartilha(x, el, marca(x))).join("") || `<div class="vazio">Nenhum dano da Cartilha na lista deste elemento.</div>`)
+    + (verMais && outros.length ? `<p class="suave" style="margin:14px 0 8px"><b>Demais danos da Cartilha (${outros.length})</b></p>`
+      + outros.map(x => itemCartilha(x, el, marca(x))).join("") : "")
+    + (verMais && outros.length ? `<div class="botoes" style="margin-bottom:8px"><button class="botao secundario" data-mais="1">Ver menos</button></div>`
+      : escondidos.length ? `<div class="botoes" style="margin-bottom:8px"><button class="botao secundario" data-mais="1">Ver mais (${escondidos.length} danos da Cartilha)</button></div>` : "");
+}
+/* texto escrito à mão: em qual dano da Cartilha ele cai (ou o aviso que vale), enquanto se escreve */
+function htmlTextoCartilha(texto, el) {
+  if (!el || !cartilha() || !texto.trim()) return "";
+  const es = cartilhaAchar(texto, el), ns = cartilhaNaoDano(texto, el);
+  const aviso = ns.length ? `<p style="color:var(--alerta)">⚠ ${esc(cartilhaCampo(ns[0].aviso))}</p>` : "";
+  return es.length ? `<p style="color:var(--ok)">✔ Na Cartilha: ${es.map(x => `<b>${esc(x.nome)}</b>${x.pag
+      ? `<button class="ver-mini" data-ver="${x.id}" aria-label="Ver ${esc(x.nome)} na Cartilha">📖</button>` : ""}`).join("; ")}</p>${aviso}`
+    : aviso || `<p class="suave">Fora da Cartilha: o app aceita o texto, mas não confere o EC.</p>`;
+}
+/* "+ Dano sem foto" com a Cartilha: a lista do elemento numa janela (o 📖 abre a página por cima dela). Devolve o nome
+ * do dano escolhido, "" para escrever outro ou null (cancelou). */
+function escolherDanoCartilha(el) {
+  return new Promise(ok => {
+    let verMais = false;
+    const j = document.createElement("div");
+    j.className = "janela";
+    const desenhar = () => {
+      const topo = j.firstElementChild?.scrollTop || 0;   // "Ver mais" fica onde estava
+      j.innerHTML = `<div class="cartao" role="dialog" aria-modal="true"><h3>Dano sem foto</h3>${htmlListaCartilha(el, verMais)}
+        <button class="botao secundario" data-outro="1">Outro dano (escrever)</button>
+        <button class="botao" data-cancelar="1">Cancelar</button></div>`;
+      j.firstElementChild.scrollTop = topo;
+    };
+    const fim = val => { j.remove(); ok(val); };
+    j.onclick = ev => {
+      if (ev.target.closest("[data-ver]")) return;
+      const b = ev.target.closest("button");
+      if (ev.target === j || b?.dataset.cancelar) return fim(null);
+      if (!b) return;
+      if (b.dataset.mais) { verMais = !verMais; return desenhar(); }
+      fim(b.dataset.outro ? "" : b.dataset.dano);
+    };
+    desenhar();
+    document.body.appendChild(j);
+  });
+}
+
+/* página da Cartilha em tela cheia ("Ver na Cartilha", usuário, 04/11/2026): a página do dano, com as fotos de exemplo
+ * de cada EC; ‹ › folheia a Cartilha e tocar na imagem amplia. As páginas 16 a 64 vão com o app (cartilha/pNN.jpg, do
+ * ferramentas\cartilha_imagens.py) e ficam guardadas no aparelho (baixarCartilha). O "voltar" do celular fecha a
+ * página, não a tela. */
+const PAGINAS_CARTILHA = Array.from({ length: 49 }, (_, i) => 16 + i);
+const CACHE_CARTILHA = "cartilha-ipr-2025";   // o mesmo do sw.js
+const imagemPagina = p => `cartilha/p${pad(p)}.jpg`;
+const paginasDe = x => x?.pag ? [x.pag, ...(cartilha()?.paginas_ver?.[x.id] || [])] : [];
+const rotuloPaginas = x => `p. ${paginasDe(x).join(" e ")}`;
+let visor = null;   // { x, p } enquanto a página está aberta
+
+function verCartilha(id) {
+  const x = cartilha()?.danos.find(y => y.id === id);
+  if (!paginasDe(x).length) return;
+  if (!visor) history.pushState({ cartilha: true }, "");
+  visor = { x, p: paginasDe(x)[0] };
+  mostrarPagina();
+}
+function mostrarPagina() {
+  const { x, p } = visor, i = PAGINAS_CARTILHA.indexOf(p), doDano = paginasDe(x).includes(p);
+  let t = $(".cartilha-tela");
+  if (!t) {
+    t = document.createElement("div");
+    t.className = "cartilha-tela";
+    t.setAttribute("role", "dialog");
+    t.setAttribute("aria-modal", "true");
+    document.body.appendChild(t);
+    document.body.style.overflow = "hidden";
+  }
+  t.classList.remove("ampliada");
+  const falta = `<div class="falta">A imagem da p. ${p} não está no aparelho. As páginas da Cartilha são baixadas quando o app abre com internet.</div>`;
+  t.innerHTML = `<div class="barra">
+      <button data-ir="-1" ${i <= 0 ? "disabled" : ""} aria-label="Página anterior">‹</button>
+      <b>${doDano ? esc(x.nome) : "Cartilha de Bolso"}<small>Cartilha p. ${p}${doDano && x.criterio === "equipe" ? " · dano parecido (a Cartilha não traz este)" : ""}</small></b>
+      <button data-ir="1" ${i < 0 || i >= PAGINAS_CARTILHA.length - 1 ? "disabled" : ""} aria-label="Próxima página">›</button>
+      <button data-fechar aria-label="Fechar">✕</button>
+    </div>
+    <div class="pagina">${i < 0 ? falta : `<img src="${imagemPagina(p)}" alt="Cartilha de Bolso, p. ${p}">`}</div>
+    <div class="dica">Toque na página para ampliar · ‹ › folheia a Cartilha</div>`;
+  const img = t.querySelector("img");
+  if (img) {
+    img.onclick = () => t.classList.toggle("ampliada");
+    img.onerror = () => { t.querySelector(".pagina").innerHTML = falta; };
+  }
+  t.querySelectorAll("[data-ir]").forEach(b => { b.onclick = () => { visor.p = PAGINAS_CARTILHA[i + Number(b.dataset.ir)]; mostrarPagina(); }; });
+  t.querySelector("[data-fechar]").onclick = () => history.back();
+  [PAGINAS_CARTILHA[i - 1], PAGINAS_CARTILHA[i + 1]].forEach(q => { if (q) new Image().src = imagemPagina(q); });   // folhear sem espera
+}
+function fecharCartilha() {
+  $(".cartilha-tela")?.remove();
+  document.body.style.overflow = "";
+  visor = null;
+}
+window.addEventListener("popstate", () => { if (visor) fecharCartilha(); });
+document.addEventListener("keydown", ev => { if (visor && ev.key === "Escape") history.back(); });
+// o 📖 (data-ver), em qualquer tela ou janela, abre a página do dano
+document.addEventListener("click", ev => {
+  const b = ev.target.closest("[data-ver]");
+  if (b) { ev.preventDefault(); verCartilha(b.dataset.ver); }
+});
+
+/* páginas da Cartilha no aparelho, para o 📖 funcionar sem sinal: as que faltam são baixadas em segundo plano quando o
+ * app abre com internet (5,6 MB na primeira vez), num cache à parte que não se perde a cada versão nova do app.
+ * Devolve quantas estão guardadas (null se o navegador não guarda). */
+async function faltamCartilha(c) {
+  const faltam = [];
+  for (const p of PAGINAS_CARTILHA) if (!(await c.match(imagemPagina(p), { ignoreVary: true }))) faltam.push(p);
+  return faltam;
+}
+async function baixarCartilha() {
+  if (!cartilha() || !("caches" in window)) return null;
+  if (!baixarCartilha.indo) baixarCartilha.indo = (async () => {
+    const c = await caches.open(CACHE_CARTILHA);
+    const faltam = await faltamCartilha(c);
+    let n = PAGINAS_CARTILHA.length - faltam.length;
+    for (const p of faltam) {
+      try {
+        const r = await fetch(imagemPagina(p));
+        if (!r.ok) break;
+        await c.put(imagemPagina(p), r);
+        n++;
+      } catch (e) { break; }   // sem rede: as que faltam vêm na próxima vez
+    }
+    return n;
+  })().finally(() => { baixarCartilha.indo = null; });
+  return baixarCartilha.indo;
+}
+const textoCartilha = n => n == null ? "Cartilha de Bolso: este navegador não guarda as páginas no aparelho; o 📖 precisa de internet."
+  : n >= PAGINAS_CARTILHA.length ? `Cartilha de Bolso: as ${PAGINAS_CARTILHA.length} páginas estão no aparelho (o 📖 funciona sem sinal).`
+  : `Cartilha de Bolso: ${n} de ${PAGINAS_CARTILHA.length} páginas no aparelho. As que faltam baixam sozinhas quando o app abre com internet (5,6 MB ao todo).`;
+
 /* ---------- fotos de dano ---------- */
 // tipos de dano por tipo de elemento (termos da planilha de patologias da equipe; o usuário pediu a lista filtrada
-// pelo elemento escolhido, com "ver todos" e "outro dano" escrito à mão)
+// pelo elemento escolhido, com "ver todos" e "outro dano" escrito à mão). Desde a 0.8.0, só para pacote sem a Cartilha.
 const CONCRETO = ["Fissuras", "Trincas", "Armadura exposta", "Corrosão de armadura", "Desagregação", "Desplacamento",
   "Lixiviação/eflorescência", "Infiltração/umidade", "Manchas", "Carbonatação", "Ninhos de concretagem", "Sujidade",
   "Vegetação", "Pichação"];
@@ -1043,12 +1348,13 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
       </div></div>
     ${extra ? "" : `<h2>4. Dano</h2>
     <p class="suave" id="danos-tipo"></p>
-    <div class="fichas" id="danos"></div>
+    <div class="${cartilha() ? "" : "fichas"}" id="danos"></div>
     <button id="ver-todos" class="botao secundario" style="min-height:40px;padding:6px 14px;width:auto;font-size:.9rem"></button>
     <div class="linha" style="margin-top:10px">
       <input id="outro" type="text" placeholder="Outro dano…">
       <button id="add-outro" class="botao" style="width:auto;min-height:48px;padding:8px 14px">Adicionar</button>
     </div>
+    <div id="outro-res"></div>
     <h2>5. Avaliação do dano</h2>
     <div id="aval"></div>`}
     <label class="campo"><span>${extra ? "4. Legenda" : "Legenda"}</span>
@@ -1070,11 +1376,21 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
     if (f.el && f.x == null) { f.x = centroTramo(o, f.el.tramo); f.y = 0.5; }   // sugestão: meio do tramo
     document.querySelectorAll("#sug input").forEach(i => { i.checked = !!f.el && i.value === chave; });
     $("#el-todos").value = f.el && !sug.includes(f.el) ? chave : "";
+    f.verTodos = false;
     desenharDanos(); desenharLegenda(); desenharCroqui(); gravar().then(desenharAval);
+    if ($("#outro")?.value) $("#outro-res").innerHTML = htmlTextoCartilha($("#outro").value, f.el);
   };
-  // danos: só os do tipo do elemento escolhido (ou todos, a pedido), mais os já marcados e os escritos à mão
+  // danos: só os do tipo do elemento escolhido (ou todos, a pedido), mais os já marcados e os escritos à mão. Com a
+  // Cartilha (0.8.0), a lista dela para o elemento: os principais e o resto em "Ver mais" (toque no item marca/desmarca)
   const desenharDanos = () => {
     if (extra) return;
+    if (cartilha()) {
+      $("#ver-todos").hidden = true;
+      $("#danos-tipo").hidden = !!f.el;
+      $("#danos-tipo").textContent = "Escolha o elemento para ver os danos da Cartilha dele.";
+      $("#danos").innerHTML = f.el ? htmlListaCartilha(f.el, f.verTodos, f.danos) : f.danos.map(t => itemAvulso(t, null)).join("");
+      return;
+    }
     const tipo = f.el ? tipoElemento(f.el) : null;
     const lista = [...new Set([...(!tipo || f.verTodos ? DANOS : DANOS_POR_TIPO[tipo]), ...f.danos])];
     $("#danos").innerHTML = lista.map(d => `
@@ -1117,8 +1433,7 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
           ${aq ? `<p style="color:var(--alerta)">⚠ ${esc(aq)} — confira a quantidade.</p>` : ""}
           <label class="campo${classeFalta(mf, d.extensao)}"><span>${rotuloCampo("Extensão relativa", true)}</span><select data-campo="extensao"><option value="">—</option>
             ${EXTENSOES.map(x => `<option ${d.extensao === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
-          <div class="campo${classeFalta(mf, d.ec)}"><span>${rotuloCampo("Estado de condição (EC)", true)}</span><div class="ecs">${[4, 3, 2, 1].map(n =>
-            `<button class="ec ${d.ec === n ? "marcada" : ""}" data-ec="${n}">${n} - ${ECS_NORMA[n]}</button>`).join("")}</div></div>
+          ${htmlEC(d, f.el, mf)}
           <details ${d.insuficiencia || d.causa ? "open" : ""}><summary>Insuficiência estrutural e causa provável (opcional)</summary>
             <label class="campo"><span>Insuficiência estrutural</span><textarea data-campo="insuficiencia" rows="2">${esc(d.insuficiencia || "")}</textarea></label>
             <label class="campo"><span>Causa provável</span><textarea data-campo="causa" rows="2">${esc(d.causa || "")}</textarea></label>
@@ -1133,15 +1448,16 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
         const valor = () => campo === "quant" ? lerQuant(c.value) : (c.value.trim() || null);
         // campo vazio marcado em vermelho: sai do vermelho ao ser preenchido (sem redesenhar, para não perder o foco)
         const marca = () => { if (marcarFaltas) c.closest(".campo")?.classList.toggle("falta", vazio(c.value)); };
-        if (c.tagName === "SELECT") c.onchange = () => { marca(); alterarLinha(tipo, campo, c.value || null); };
+        // a extensão muda os EC que a Cartilha admite nos danos medidos em % da superfície: redesenha
+        if (c.tagName === "SELECT") c.onchange = () => { marca(); alterarLinha(tipo, campo, c.value || null); if (cartilha()) desenharAval(); };
         else {
           c.oninput = () => { marca(); const l = linha(); if (l) l[campo] = valor(); if (campo === "localizacao") desenharLegenda(); };
           // quantidade e localização mudam o aviso de quantidade (redesenha ao sair do campo); a localização também
-          // muda a legenda, gravada na foto
+          // muda a legenda, gravada na foto; a descrição muda o dano da Cartilha e o aviso dela
           c.onchange = () => {
             const p = alterarLinha(tipo, campo, valor());
             if (campo === "localizacao") gravar().then(desenharAval);
-            else if (campo === "quant") p.then(desenharAval);
+            else if (campo === "quant" || (campo === "dano" && cartilha())) p.then(desenharAval);
           };
         }
       });
@@ -1202,14 +1518,29 @@ async function telaDano(vid, kArg, pertoArg, extraNovo = false, elArg = null) {
 
   if (!extra) {
     $("#ver-todos").onclick = () => { f.verTodos = !f.verTodos; desenharDanos(); };
+    // lista da Cartilha: "Ver mais"/"Ver menos" e o toque no dano (o 📖 abre a página, no ouvinte geral)
+    $("#danos").onclick = ev => {
+      if (!cartilha() || ev.target.closest("[data-ver]")) return;
+      const b = ev.target.closest("button");
+      if (b?.dataset.mais) { f.verTodos = !f.verTodos; return desenharDanos(); }
+      const t = b?.dataset.dano;
+      if (t == null) return;
+      const marcado = f.danos.includes(t);
+      f.danos = marcado ? f.danos.filter(x => x !== t) : [...f.danos, t];
+      if (!marcado) f.reativar.push(t);
+      desenharDanos(); desenharLegenda(); gravar().then(desenharAval);
+    };
     $("#add-outro").onclick = () => {
       const t = $("#outro").value.trim();
       if (!t) return avisar("Escreva o dano no campo ao lado.");
       if (!f.danos.some(d => d.toLowerCase() === t.toLowerCase())) { f.danos.push(t); f.reativar.push(t); }
       $("#outro").value = "";
+      $("#outro-res").innerHTML = "";
       desenharDanos(); desenharLegenda(); gravar().then(desenharAval);
     };
     $("#outro").onkeydown = ev => { if (ev.key === "Enter") { ev.preventDefault(); $("#add-outro").click(); } };
+    // texto escrito à mão: em qual dano da Cartilha ele cai, enquanto se escreve
+    $("#outro").oninput = () => { $("#outro-res").innerHTML = htmlTextoCartilha($("#outro").value, f.el); };
   }
   $("#legenda").oninput = ev => { f.legenda = ev.target.value; f.editada = true; $("#leg-auto").hidden = false; };
   $("#legenda").onchange = gravar;
@@ -1331,9 +1662,10 @@ const NAO_ESTRUTURAIS = ["drenagem", "junta", "pavimento", "protecao"];
 const estrutural = e => typeof e.estrutural === "boolean" ? e.estrutural   // do pacote (regra única)
   : e.grupo !== "Complementar" && !NAO_ESTRUTURAIS.includes(tipoElemento(e));
 
-/* nota sugerida (mesma regra do gerar.py): sem dano, 5; com dano, o menor EC (no máximo 4); faltando EC, nenhuma */
-function notaSugerida(a) {
-  const ds = a?.danos || [];
+/* nota sugerida (mesma regra do gerar.py): sem dano, 5; com dano, o menor EC (no máximo 4); faltando EC, nenhuma.
+ * Com a Cartilha (0.8.0), texto que não é dano (sujidade, vegetação…) não conta: o app avisa para tirá-lo. */
+function notaSugerida(a, el) {
+  const ds = (a?.danos || []).filter(d => !cartilhaNaoConta(d, el));
   if (!ds.length) return 5;
   return ds.some(d => d.ec == null) ? null : Math.min(4, ...ds.map(d => d.ec));
 }
@@ -1524,21 +1856,24 @@ async function telaElemento(vid, i) {
   let marcarFaltas = false;   // depois de tentar concluir com campo obrigatório vazio: campos vazios em vermelho
 
   const desenhar = () => {
-    const sug = notaSugerida(av);
+    const sug = notaSugerida(av, e);
     const alertas = [];
     const mf = marcarFaltas;
+    const reais = av.danos.filter(d => !cartilhaNaoConta(d, e));   // sem o texto que não é dano (Cartilha)
     av.danos.forEach((d, j) => {
       const fs = faltasDano(d);
       if (fs.length) alertas.push(`${rotuloDano(d, j)}: falta ${listaE(fs)}.`);
       const q = alertaQuant(e, d);
       if (q) alertas.push(`Dano ${j + 1}: ${q} — confira a quantidade.`);
+      if (cartilhaNaoConta(d, e))
+        alertas.push(`Dano ${j + 1}: o texto não é dano da Cartilha e não conta para a nota sugerida. Tire-o ou troque pelo dano da Cartilha.`);
     });
-    const ecs = av.danos.filter(d => d.ec != null).map(d => d.ec);
+    const ecs = reais.filter(d => d.ec != null).map(d => d.ec);
     if (av.nota != null && ecs.length && Math.min(...ecs) <= 2 && av.nota >= 4)
       alertas.push(`Dano com EC ${Math.min(...ecs)} e nota ${av.nota}: conferir a coerência (Anexos C e D).`);
     if (av.nota != null && av.nota <= 3 && !av.danos.some(d => d.insuficiencia))
       alertas.push("Nota 3 ou menor indica insuficiência estrutural: descreva-a no dano (pode ser depois, no escritório).");
-    if (av.nota === 5 && av.danos.length) alertas.push("Nota 5 é sem danos (Anexo C), mas há danos registrados.");
+    if (av.nota === 5 && reais.length) alertas.push("Nota 5 é sem danos (Anexo C), mas há danos registrados.");
     if (av.nota != null && av.nota < 5 && !av.danos.length)
       alertas.push(`Sem dano registrado e nota ${av.nota}: pela norma (Anexo C), elemento sem dano é nota 5.`);
     // "Manter como na anterior": sem dano nesta vistoria, copia a nota e o dano; com dano, junta o da anterior como mais
@@ -1586,8 +1921,7 @@ async function telaElemento(vid, i) {
           </div>
           <label class="campo${classeFalta(mf, d.extensao)}"><span>${rotuloCampo("Extensão relativa", true)}</span><select data-campo="extensao"><option value="">—</option>
             ${EXTENSOES.map(x => `<option ${d.extensao === x ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
-          <div class="campo${classeFalta(mf, d.ec)}"><span>${rotuloCampo("Estado de condição (EC)", true)}</span><div class="ecs">${[4, 3, 2, 1].map(n =>
-            `<button class="ec ${d.ec === n ? "marcada" : ""}" data-ec="${n}">${n} - ${ECS_NORMA[n]}</button>`).join("")}</div></div>
+          ${htmlEC(d, e, mf)}
           <details ${d.insuficiencia || d.causa ? "open" : ""}><summary>Insuficiência estrutural e causa provável (opcional)</summary>
             <label class="campo"><span>Insuficiência estrutural</span><textarea data-campo="insuficiencia" rows="2">${esc(d.insuficiencia || "")}</textarea></label>
             <label class="campo"><span>Causa provável</span><textarea data-campo="causa" rows="2">${esc(d.causa || "")}</textarea></label>
@@ -1596,7 +1930,7 @@ async function telaElemento(vid, i) {
         </div>`).join("") || `<div class="vazio">Nenhum dano registrado neste elemento.</div>`}
       <div class="opcoes"><button id="add-dano" class="botao secundario">+ Dano sem foto</button><button id="sem-dano" class="botao secundario">Sem dano</button></div>
       <h2>Nota do elemento <span class="obrig">*</span></h2>
-      <p class="suave">${sug != null ? `Sugerida: <b>${sug} – ${NOTAS_NORMA[sug][0]}</b> ${av.danos.length ? "(menor EC dos danos, no máximo 4)" : "(sem dano)"}.`
+      <p class="suave">${sug != null ? `Sugerida: <b>${sug} – ${NOTAS_NORMA[sug][0]}</b> ${reais.length ? "(menor EC dos danos, no máximo 4)" : "(sem dano)"}.`
         : "Preencha o EC dos danos para ver a nota sugerida."}</p>
       <div class="notas${mf && av.nota == null ? " falta" : ""}">${[5, 4, 3, 2, 1].map(n => `<button class="nota ${av.nota === n ? "marcada" : ""}" data-nota="${n}"><b>${n}</b><span>${NOTAS_NORMA[n][0]}</span></button>`).join("")}</div>
       <p class="suave" style="margin-top:8px">${av.nota != null ? `<b>${av.nota} – ${NOTAS_NORMA[av.nota][0]}:</b> ${NOTAS_NORMA[av.nota][1]}` : "Toque na nota (Anexo C da DNIT 010/2024-PRO)."}</p>
@@ -1617,8 +1951,9 @@ async function telaElemento(vid, i) {
             // campo vazio marcado em vermelho: sai do vermelho ao ser preenchido (sem redesenhar, para não perder o foco)
             if (marcarFaltas) c.closest(".campo")?.classList.toggle("falta", vazio(d[campo]));
           };
-          // quantidade e localização mudam os avisos (item 8): redesenha ao sair do campo
-          c.onchange = ["quant", "localizacao"].includes(campo) ? () => { salvar(); desenhar(); } : salvar;
+          // quantidade e localização mudam os avisos (item 8), e a descrição muda o dano da Cartilha e o aviso dela:
+          // redesenha ao sair do campo
+          c.onchange = ["quant", "localizacao", ...(cartilha() ? ["dano"] : [])].includes(campo) ? () => { salvar(); desenhar(); } : salvar;
         }
       });
       cartao.querySelectorAll("[data-ec]").forEach(b => { b.onclick = () => { d.ec = Number(b.dataset.ec); salvar(); desenhar(); }; });
@@ -1636,11 +1971,17 @@ async function telaElemento(vid, i) {
         salvar(); desenhar();
       };
     });
-    $("#add-dano").onclick = () => {
-      av.danos.push({ dano: "", quant: null, localizacao: null, extensao: null, ec: null, insuficiencia: null, causa: null, fotos: [], origem: "manual" });
+    // com a Cartilha, o dano sai da lista dela para o elemento (ou "Outro dano", escrito à mão)
+    $("#add-dano").onclick = async () => {
+      const nome = cartilha() ? await escolherDanoCartilha(e) : "";
+      if (nome == null) return;
+      av.danos.push({ dano: nome, quant: null, localizacao: null, extensao: null, ec: null, insuficiencia: null, causa: null, fotos: [], origem: "manual",
+        ...(nome ? { tipo: nome } : {}) });
       avisar("Dano sem foto: se possível, registre também a foto do dano.", 4000);
       salvar(); desenhar();
-      document.querySelector(`[data-j="${av.danos.length - 1}"]`)?.scrollIntoView({ behavior: "smooth" });
+      const novo = document.querySelector(`[data-j="${av.danos.length - 1}"]`);
+      novo?.scrollIntoView({ behavior: "smooth" });
+      if (!nome) novo?.querySelector('[data-campo="dano"]')?.focus({ preventScroll: true });
     };
     $("#sem-dano").onclick = () => {
       if (fotos.length && !confirm("Este elemento tem foto de dano. Marcar mesmo como sem dano?")) return;
@@ -1882,6 +2223,16 @@ function conferencia(v, o) {
   // quantidades estranhas (item 8)
   const quants = alertasQuant(v, o);
   add(!quants.length, quants.length ? `Quantidades a conferir: ${quants.slice(0, 4).join("; ")}${quants.length > 4 ? "…" : ""}` : "Quantidades coerentes");
+  // EC e texto do dano pela Cartilha (0.8.0): o app só avisa; o importar_vistoria.py confere igual no escritório
+  if (cartilha()) {
+    const cart = [];
+    o.elementos.forEach((e, i) => (avaliacaoDe(v, o, i)?.danos || []).forEach(d => {
+      const t = d.dano || d.tipo || "";
+      const aviso = cartilhaConferir(t, d.ec, d.extensao, e) || cartilhaCampo(cartilhaNaoDano(t, e)[0]?.aviso);
+      if (aviso) cart.push(`${nomeCurto(o, nomesC, i)} – ${aviso}`);
+    }));
+    add(!cart.length, cart.length ? `Cartilha: ${cart.length} dano(s) a conferir (o app só avisa):` : "EC dos danos de acordo com a Cartilha", cart);
+  }
   const an = v.anotacoes || {};
   add(true, an.aspectos?.length || an.deficiencias?.length || an.aspectos_texto || an.deficiencias_texto || an.observacoes
     ? "Anotações de campo preenchidas" : "Sem anotações de campo (opcional)");
@@ -1992,6 +2343,11 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
 
 /* ---------- início ---------- */
 window.addEventListener("hashchange", rotear);
-carregarPacote().then(rotear).catch(e => {
+carregarPacote().then(() => {
+  baixarCartilha().catch(e => console.warn("cartilha:", e));   // em segundo plano: as páginas que faltam no aparelho
+  return rotear();
+}).catch(e => {
   $("#tela").innerHTML = `<div class="cartao"><h3>Não foi possível abrir o armazenamento</h3><p>${esc(e.message)}</p></div>`;
 });
+// sinal de volta (ex.: celular saiu da área sem cobertura): completa as páginas da Cartilha
+window.addEventListener("online", () => { baixarCartilha().catch(e => console.warn("cartilha:", e)); });
