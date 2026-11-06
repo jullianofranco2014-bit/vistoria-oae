@@ -11,7 +11,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.8.0";
+const VERSAO_APP = "0.8.1";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -1897,7 +1897,7 @@ async function telaElemento(vid, i) {
           ${podeCopiar ? `<div class="botoes"><button id="copiar" class="botao secundario">${av.danos.length
             ? "Juntar o dano da anterior aos desta vistoria" : "Manter como na anterior"}</button></div>`
             : ant.dano && av.danos.some(d => d.origem === "anterior") ? `<p class="suave">O dano da anterior já está entre os desta vistoria.</p>` : ""}`
-          : `<p class="suave">${e.novo_desde ? "Elemento novo: separado a partir desta vistoria (antes ficava dentro da laje)." : "Este elemento não está na ficha anterior."}</p>`}
+          : `<p class="suave">${e.novo_desde ? "Elemento novo: entra na ficha a partir desta vistoria." : "Este elemento não está na ficha anterior."}</p>`}
       </div>
       ${buzinote ? `<div class="cartao"><h3>Quantidade de buzinotes</h3>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
