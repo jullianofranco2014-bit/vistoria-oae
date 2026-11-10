@@ -1,6 +1,6 @@
 /* Service worker: guarda os arquivos do app para funcionar sem internet.
  * Ao publicar uma versão nova do app, trocar o nome do CACHE (e o ?v= no index.html). */
-const CACHE = "vistoria-oae-v0.8.1";
+const CACHE = "vistoria-oae-v0.8.2";
 const ARQUIVOS = ["./", "index.html", "estilo.css", "app.js", "manifest.webmanifest", "icone.svg", "icone-192.png", "icone-512.png"];
 // páginas da Cartilha de Bolso (0.8.0): num cache à parte, que não se apaga a cada versão nova do app (5,6 MB). Quem
 // baixa é o app (baixarCartilha, em app.js, com o mesmo nome); aqui elas só são servidas, primeiro do aparelho.

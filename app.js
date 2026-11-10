@@ -11,7 +11,7 @@
  */
 "use strict";
 
-const VERSAO_APP = "0.8.1";
+const VERSAO_APP = "0.8.2";
 
 /* ---------- armazenamento (IndexedDB) ---------- */
 const BD = {
@@ -1663,6 +1663,7 @@ const estrutural = e => typeof e.estrutural === "boolean" ? e.estrutural   // do
   : e.grupo !== "Complementar" && !NAO_ESTRUTURAIS.includes(tipoElemento(e));
 
 /* nota sugerida (mesma regra do gerar.py): sem dano, 5; com dano, o menor EC (no máximo 4); faltando EC, nenhuma.
+ * Sem dano, a nota 4 também vale (desgaste da estrutura; usuário, 10/11/2026): a sugestão é 5, mas o 4 não é erro.
  * Com a Cartilha (0.8.0), texto que não é dano (sujidade, vegetação…) não conta: o app avisa para tirá-lo. */
 function notaSugerida(a, el) {
   const ds = (a?.danos || []).filter(d => !cartilhaNaoConta(d, el));
@@ -1874,8 +1875,7 @@ async function telaElemento(vid, i) {
     if (av.nota != null && av.nota <= 3 && !av.danos.some(d => d.insuficiencia))
       alertas.push("Nota 3 ou menor indica insuficiência estrutural: descreva-a no dano (pode ser depois, no escritório).");
     if (av.nota === 5 && reais.length) alertas.push("Nota 5 é sem danos (Anexo C), mas há danos registrados.");
-    if (av.nota != null && av.nota < 5 && !av.danos.length)
-      alertas.push(`Sem dano registrado e nota ${av.nota}: pela norma (Anexo C), elemento sem dano é nota 5.`);
+    // sem dano, nota 4 ou 5 é escolha do vistoriador (4 = desgaste; usuário, 10/11/2026): não há alerta
     // "Manter como na anterior": sem dano nesta vistoria, copia a nota e o dano; com dano, junta o da anterior como mais
     // uma linha (uma vez) e não mexe no que já foi preenchido
     const podeCopiar = !!ant && (av.danos.length ? !!ant.dano && !av.danos.some(d => d.origem === "anterior") : ant.nota != null || !!ant.dano);
@@ -1893,7 +1893,7 @@ async function telaElemento(vid, i) {
         ${ant ? `<p>Nota: <b>${ant.nota != null ? `${ant.nota} – ${NOTAS_NORMA[ant.nota][0]}` : "não informada na ficha"}</b></p>
           ${ant.dano ? `<p>${esc(ant.dano.dano)}</p><p class="suave">${[ant.dano.quant != null ? `quant. ${ant.dano.quant}` : "", ant.dano.localizacao,
             ant.dano.extensao, ant.dano.ec ? `EC ${ant.dano.ec} - ${ECS_NORMA[ant.dano.ec]}` : ""].filter(Boolean).map(esc).join(" · ")}</p>`
-            : `<p class="suave">Sem dano registrado.${ant.nota != null && ant.nota < 5 ? ` A nota ${ant.nota} sem dano estava errada: pela norma, sem dano é nota 5.` : ""}</p>`}
+            : `<p class="suave">Sem dano registrado.</p>`}
           ${podeCopiar ? `<div class="botoes"><button id="copiar" class="botao secundario">${av.danos.length
             ? "Juntar o dano da anterior aos desta vistoria" : "Manter como na anterior"}</button></div>`
             : ant.dano && av.danos.some(d => d.origem === "anterior") ? `<p class="suave">O dano da anterior já está entre os desta vistoria.</p>` : ""}`
@@ -1930,7 +1930,7 @@ async function telaElemento(vid, i) {
         </div>`).join("") || `<div class="vazio">Nenhum dano registrado neste elemento.</div>`}
       <div class="opcoes"><button id="add-dano" class="botao secundario">+ Dano sem foto</button><button id="sem-dano" class="botao secundario">Sem dano</button></div>
       <h2>Nota do elemento <span class="obrig">*</span></h2>
-      <p class="suave">${sug != null ? `Sugerida: <b>${sug} – ${NOTAS_NORMA[sug][0]}</b> ${reais.length ? "(menor EC dos danos, no máximo 4)" : "(sem dano)"}.`
+      <p class="suave">${sug != null ? `Sugerida: <b>${sug} – ${NOTAS_NORMA[sug][0]}</b> ${reais.length ? "(menor EC dos danos, no máximo 4)" : "(sem dano; 4 se a estrutura tiver desgaste)"}.`
         : "Preencha o EC dos danos para ver a nota sugerida."}</p>
       <div class="notas${mf && av.nota == null ? " falta" : ""}">${[5, 4, 3, 2, 1].map(n => `<button class="nota ${av.nota === n ? "marcada" : ""}" data-nota="${n}"><b>${n}</b><span>${NOTAS_NORMA[n][0]}</span></button>`).join("")}</div>
       <p class="suave" style="margin-top:8px">${av.nota != null ? `<b>${av.nota} – ${NOTAS_NORMA[av.nota][0]}:</b> ${NOTAS_NORMA[av.nota][1]}` : "Toque na nota (Anexo C da DNIT 010/2024-PRO)."}</p>
@@ -1988,7 +1988,8 @@ async function telaElemento(vid, i) {
       if (av.danos.length && !fotos.length && !confirm("Remover os danos registrados e marcar como sem dano?")) return;
       av.descartados = [...new Set([...av.descartados, ...av.danos.map(d => d.tipo).filter(Boolean)])];
       av.danos = [];
-      av.nota = 5;
+      // sem dano, 4 ou 5 valem (10/11/2026): o 4 já marcado fica; nota menor ou vazia vira 5
+      if (av.nota == null || av.nota < 4) av.nota = 5;
       salvar(); desenhar();
     };
     document.querySelectorAll("[data-nota]").forEach(b => { b.onclick = () => { av.nota = Number(b.dataset.nota); salvar(); desenhar(); }; });
@@ -2004,12 +2005,12 @@ async function telaElemento(vid, i) {
           + "uma foto, complete a linha da foto e remova a da anterior.", 7000);
       }
       if (av.nota != null && !confirm(`Trocar a nota ${av.nota} pela da vistoria anterior?`)) return;
-      // sem dano na anterior: nota 5 pela norma (as fichas anteriores davam 4 a elemento sem dano — usuário, 02/10/2026)
-      av.nota = ant.dano ? ant.nota : 5;
+      // copia a nota da anterior também sem dano: 4 sem dano vale (desgaste; usuário, 10/11/2026, no lugar da regra de
+      // 02/10/2026, que trocava por 5)
+      av.nota = ant.nota;
       av.danos = ant.dano ? [{ ...ant.dano, fotos: [], origem: "anterior" }] : [];
       salvar(); desenhar();
-      avisar(!ant.dano && ant.nota !== 5 ? `Sem dano na anterior: nota 5, pela norma (a anterior tinha ${ant.nota ?? "sem nota"}).`
-        : "Copiado da vistoria anterior. Confira e ajuste o que mudou.", 4000);
+      avisar("Copiado da vistoria anterior. Confira e ajuste o que mudou.", 4000);
     };
     $("#concluir").onclick = async () => {
       // campos obrigatórios (usuário, 27/10/2026): não conclui e diz qual falta; os vazios ficam em vermelho
